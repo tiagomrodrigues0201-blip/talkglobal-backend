@@ -29,16 +29,11 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 function verificarAcesso(req, res, next) {
-  function verificarAcesso(req, res, next) {
   const userKey = (req.headers["x-talkglobal-key"] || "").trim();
 
   console.log("=== DEBUG ===");
   console.log("KEY RECEBIDA:", userKey);
   console.log("CHAVES DISPONÍVEIS:", Object.keys(ACCESS_USERS));
-
-  const user = ACCESS_USERS[userKey];
-
-  console.log("USER ENCONTRADO:", user);
 
   if (!userKey) {
     return res.status(401).json({
@@ -47,6 +42,8 @@ function verificarAcesso(req, res, next) {
   }
 
   const user = ACCESS_USERS[userKey];
+
+  console.log("USER ENCONTRADO:", user);
 
   if (!user) {
     return res.status(403).json({
