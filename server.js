@@ -41,7 +41,7 @@ function verificarAcesso(req, res, next) {
 
   if (!user) {
     return res.status(403).json({
-      erro: "Acesso não autorizado."
+      erro: "TESTE_RENDER_123"
     });
   }
 
