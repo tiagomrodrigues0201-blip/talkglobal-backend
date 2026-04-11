@@ -8,7 +8,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ACCESS_USERS = {
   tg_test_trial: {
     status: "trial",
-    trialEndsAt: "2026-04-14T23:59:59.000Z",
+    trialEndsAt: "2030-01-01T23:59:59.000Z",
     email: "teste_trial@talkglobal.com"
   },
 
