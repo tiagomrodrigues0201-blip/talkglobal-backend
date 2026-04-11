@@ -102,11 +102,6 @@ async function chamarOpenAI(systemPrompt, userPrompt) {
 function verificarAcesso(req, res, next) {
   const userKey = (req.headers["x-talkglobal-key"] || "").trim();
 
-  console.log("=== DEBUG ===");
-  console.log("KEY RECEBIDA:", userKey);
-  console.log("CHAVES FIXAS:", Object.keys(ACCESS_USERS));
-  console.log("CHAVES DINÂMICAS:", Object.keys(USERS_DB));
-
   if (!userKey) {
     return res.status(401).json({
       erro: "Chave de acesso não enviada."
@@ -114,8 +109,6 @@ function verificarAcesso(req, res, next) {
   }
 
   const user = ACCESS_USERS[userKey] || USERS_DB[userKey];
-
-  console.log("USER ENCONTRADO:", user);
 
   if (!user) {
     return res.status(403).json({
@@ -190,7 +183,6 @@ app.post("/criar-usuario", (req, res) => {
 
     const emailLimpo = email.trim().toLowerCase();
 
-    // Se já existir esse email, reaproveita
     for (const [accessKey, user] of Object.entries(USERS_DB)) {
       if (user.email === emailLimpo) {
         return res.json({
@@ -210,11 +202,6 @@ app.post("/criar-usuario", (req, res) => {
       status: "trial",
       trialEndsAt
     };
-
-    console.log("NOVO USUÁRIO CRIADO:", {
-      accessKey,
-      ...USERS_DB[accessKey]
-    });
 
     return res.json({
       accessKey,
