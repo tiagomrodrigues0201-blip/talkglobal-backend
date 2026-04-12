@@ -1,11 +1,18 @@
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
+const Stripe = require("stripe");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
+const CLIENT_SUCCESS_URL = process.env.CLIENT_SUCCESS_URL;
+const CLIENT_CANCEL_URL = process.env.CLIENT_CANCEL_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
@@ -14,18 +21,130 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 app.use(cors());
+
+app.post(
+  "/stripe-webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+        return res.status(500).send("Stripe não configurado no servidor.");
+      }
+
+      const signature = req.headers["stripe-signature"];
+
+      const event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        STRIPE_WEBHOOK_SECRET
+      );
+
+      const tipo = event.type;
+      const objeto = event.data.object;
+
+      if (tipo === "checkout.session.completed") {
+        const accessKey = objeto?.metadata?.accessKey;
+        const customerId = objeto?.customer || null;
+        const subscriptionId = objeto?.subscription || null;
+
+        if (accessKey) {
+          await atualizarUsuarioPorAccessKey(accessKey, {
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subscriptionId
+          });
+        }
+      }
+
+      if (
+        tipo === "customer.subscription.created" ||
+        tipo === "customer.subscription.updated"
+      ) {
+        const subscription = objeto;
+        const customerId = subscription.customer;
+        const subscriptionId = subscription.id;
+        const status = subscription.status;
+
+        const campos = {
+          stripe_subscription_id: subscriptionId
+        };
+
+        if (status === "trialing") {
+          campos.status = "trial";
+          campos.trial_ends_at = subscription.trial_end
+            ? new Date(subscription.trial_end * 1000).toISOString()
+            : null;
+        } else if (status === "active") {
+          campos.status = "active";
+          campos.trial_ends_at = null;
+        } else if (
+          status === "canceled" ||
+          status === "unpaid" ||
+          status === "incomplete_expired" ||
+          status === "paused"
+        ) {
+          campos.status = "blocked";
+        }
+
+        await atualizarUsuarioPorStripeCustomerId(customerId, campos);
+      }
+
+      if (tipo === "customer.subscription.deleted") {
+        const subscription = objeto;
+        const customerId = subscription.customer;
+
+        await atualizarUsuarioPorStripeCustomerId(customerId, {
+          status: "blocked",
+          stripe_subscription_id: subscription.id || null
+        });
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("Erro no webhook Stripe:", error.message);
+      return res.status(400).send(`Webhook Error: ${error.message}`);
+    }
+  }
+);
+
 app.use(express.json({ limit: "1mb" }));
 
 function gerarAccessKey() {
   return `tg_${crypto.randomBytes(16).toString("hex")}`;
 }
 
-function somarDias(data, dias) {
+function adicionarDias(data, dias) {
   const novaData = new Date(data);
   novaData.setDate(novaData.getDate() + dias);
   return novaData;
+}
+
+function garantirOpenAIKey(res) {
+  if (!OPENAI_API_KEY) {
+    res.status(500).json({
+      erro: "OPENAI_API_KEY não configurada no servidor."
+    });
+    return false;
+  }
+  return true;
+}
+
+function garantirStripeConfig(res) {
+  if (
+    !STRIPE_SECRET_KEY ||
+    !STRIPE_PRICE_ID ||
+    !CLIENT_SUCCESS_URL ||
+    !CLIENT_CANCEL_URL ||
+    !stripe
+  ) {
+    res.status(500).json({
+      erro: "Configuração Stripe incompleta no servidor."
+    });
+    return false;
+  }
+  return true;
 }
 
 function mapearUsuarioDoBanco(user) {
@@ -51,22 +170,75 @@ async function buscarUsuarioPorAccessKey(accessKey) {
     .maybeSingle();
 
   if (error) {
-    throw new Error(`Erro ao buscar usuário: ${error.message}`);
+    throw new Error(`Erro ao buscar usuário por access_key: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function buscarUsuarioPorEmail(email) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao buscar usuário por email: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function atualizarUsuarioPorAccessKey(accessKey, campos) {
+  const { data, error } = await supabase
+    .from("users")
+    .update({
+      ...campos,
+      updated_at: new Date().toISOString()
+    })
+    .eq("access_key", accessKey)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao atualizar usuário por access_key: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function atualizarUsuarioPorStripeCustomerId(customerId, campos) {
+  if (!customerId) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .update({
+      ...campos,
+      updated_at: new Date().toISOString()
+    })
+    .eq("stripe_customer_id", customerId)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Erro ao atualizar usuário por stripe_customer_id: ${error.message}`
+    );
   }
 
   return data;
 }
 
 async function criarUsuario({ email }) {
-  const accessKey = gerarAccessKey();
   const agora = new Date();
-  const trialEndsAt = somarDias(agora, 3);
-
   const payload = {
-    access_key: accessKey,
+    access_key: gerarAccessKey(),
     email: email || null,
     status: "trial",
-    trial_ends_at: trialEndsAt.toISOString(),
+    trial_ends_at: adicionarDias(agora, 3).toISOString(),
+    stripe_customer_id: null,
+    stripe_subscription_id: null,
     updated_at: agora.toISOString()
   };
 
@@ -83,29 +255,9 @@ async function criarUsuario({ email }) {
   return data;
 }
 
-async function atualizarUsuarioPorAccessKey(accessKey, campos) {
-  const payload = {
-    ...campos,
-    updated_at: new Date().toISOString()
-  };
-
-  const { data, error } = await supabase
-    .from("users")
-    .update(payload)
-    .eq("access_key", accessKey)
-    .select()
-    .single();
-
-  if (error) {
-    throw new Error(`Erro ao atualizar usuário: ${error.message}`);
-  }
-
-  return data;
-}
-
 async function verificarAcesso(req, res, next) {
   try {
-    const userKey = req.headers["x-talkglobal-key"];
+    const userKey = (req.headers["x-talkglobal-key"] || "").trim();
 
     if (!userKey) {
       return res.status(401).json({
@@ -170,16 +322,6 @@ async function verificarAcesso(req, res, next) {
   }
 }
 
-function garantirOpenAIKey(res) {
-  if (!OPENAI_API_KEY) {
-    res.status(500).json({
-      erro: "OPENAI_API_KEY não configurada no servidor."
-    });
-    return false;
-  }
-  return true;
-}
-
 async function chamarOpenAI(systemPrompt, userPrompt) {
   const resposta = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -224,14 +366,36 @@ app.post("/criar-usuario", async (req, res) => {
   try {
     const { email } = req.body || {};
 
-    const usuario = await criarUsuario({
-      email: typeof email === "string" ? email.trim() : null
-    });
+    if (!email || typeof email !== "string" || !email.trim()) {
+      return res.status(400).json({
+        erro: "Email obrigatório."
+      });
+    }
 
-    return res.status(201).json({
-      ok: true,
+    const emailLimpo = email.trim().toLowerCase();
+
+    const usuarioExistente = await buscarUsuarioPorEmail(emailLimpo);
+
+    if (usuarioExistente) {
+      return res.json({
+        accessKey: usuarioExistente.access_key,
+        email: usuarioExistente.email,
+        status: usuarioExistente.status,
+        trialEndsAt: usuarioExistente.trial_ends_at,
+        stripeCustomerId: usuarioExistente.stripe_customer_id,
+        stripeSubscriptionId: usuarioExistente.stripe_subscription_id
+      });
+    }
+
+    const usuario = await criarUsuario({ email: emailLimpo });
+
+    return res.json({
       accessKey: usuario.access_key,
-      usuario: mapearUsuarioDoBanco(usuario)
+      email: usuario.email,
+      status: usuario.status,
+      trialEndsAt: usuario.trial_ends_at,
+      stripeCustomerId: usuario.stripe_customer_id,
+      stripeSubscriptionId: usuario.stripe_subscription_id
     });
   } catch (error) {
     console.error("Erro em /criar-usuario:", error);
@@ -253,6 +417,76 @@ app.get("/meu-status", verificarAcesso, async (req, res) => {
     console.error("Erro em /meu-status:", error);
     return res.status(500).json({
       erro: error.message || "Erro ao consultar status."
+    });
+  }
+});
+
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    if (!garantirStripeConfig(res)) return;
+
+    const { accessKey } = req.body || {};
+
+    if (!accessKey || typeof accessKey !== "string") {
+      return res.status(400).json({
+        erro: "accessKey obrigatória."
+      });
+    }
+
+    const user = await buscarUsuarioPorAccessKey(accessKey);
+
+    if (!user) {
+      return res.status(404).json({
+        erro: "Usuário não encontrado."
+      });
+    }
+
+    let customerId = user.stripe_customer_id;
+
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: {
+          accessKey
+        }
+      });
+
+      customerId = customer.id;
+
+      await atualizarUsuarioPorAccessKey(accessKey, {
+        stripe_customer_id: customerId
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [
+        {
+          price: STRIPE_PRICE_ID,
+          quantity: 1
+        }
+      ],
+      success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: CLIENT_CANCEL_URL,
+      subscription_data: {
+        trial_period_days: 3,
+        metadata: {
+          accessKey
+        }
+      },
+      metadata: {
+        accessKey
+      }
+    });
+
+    return res.json({
+      checkoutUrl: session.url
+    });
+  } catch (error) {
+    console.error("Erro em /create-checkout-session:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao criar checkout session."
     });
   }
 });
@@ -328,41 +562,6 @@ ${texto.trim()}
     console.error("Erro em /converter:", error);
     return res.status(500).json({
       erro: error.message || "Erro ao converter."
-    });
-  }
-});
-
-/*
-  ROTAS OPCIONAIS DE TESTE
-  Pode manter por enquanto para testar manualmente.
-*/
-
-app.post("/admin/set-status", async (req, res) => {
-  try {
-    const { accessKey, status } = req.body || {};
-
-    if (!accessKey || !status) {
-      return res.status(400).json({
-        erro: "accessKey e status são obrigatórios."
-      });
-    }
-
-    if (!["trial", "active", "blocked"].includes(status)) {
-      return res.status(400).json({
-        erro: "Status inválido."
-      });
-    }
-
-    const usuario = await atualizarUsuarioPorAccessKey(accessKey, { status });
-
-    return res.json({
-      ok: true,
-      usuario: mapearUsuarioDoBanco(usuario)
-    });
-  } catch (error) {
-    console.error("Erro em /admin/set-status:", error);
-    return res.status(500).json({
-      erro: error.message || "Erro ao atualizar status."
     });
   }
 });
