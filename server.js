@@ -358,10 +358,6 @@ async function chamarOpenAI(systemPrompt, userPrompt) {
   return texto;
 }
 
-app.get("/", (req, res) => {
-  res.send("TalkGlobal backend online.");
-});
-
 app.post("/criar-usuario", async (req, res) => {
   try {
     const { email } = req.body || {};
