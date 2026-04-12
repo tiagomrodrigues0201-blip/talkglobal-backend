@@ -406,16 +406,13 @@ app.post("/criar-usuario", async (req, res) => {
   }
 });
 
-app.get("/", async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("users").select("*").limit(1);
-
-    if (error) {
-      return res.status(500).json({
-        ok: false,
-        tipo: "supabase_error",
-        erro: error.message
-      });
+app.get("/", (req, res) => {
+  res.json({
+    supabaseUrl: SUPABASE_URL,
+    length: SUPABASE_URL.length,
+    chars: [...SUPABASE_URL].map(c => c.charCodeAt(0))
+  });
+});
     }
 
     return res.json({
