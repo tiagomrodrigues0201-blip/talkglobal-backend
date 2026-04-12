@@ -405,18 +405,28 @@ app.post("/criar-usuario", async (req, res) => {
   }
 });
 
-app.get("/meu-status", verificarAcesso, async (req, res) => {
+app.get("/", async (req, res) => {
   try {
-    const usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
+    const { data, error } = await supabase.from("users").select("*").limit(1);
+
+    if (error) {
+      return res.status(500).json({
+        ok: false,
+        tipo: "supabase_error",
+        erro: error.message
+      });
+    }
 
     return res.json({
       ok: true,
-      usuario: mapearUsuarioDoBanco(usuario)
+      mensagem: "Conectou no Supabase",
+      total: data.length
     });
   } catch (error) {
-    console.error("Erro em /meu-status:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao consultar status."
+      ok: false,
+      tipo: "catch",
+      erro: error.message
     });
   }
 });
