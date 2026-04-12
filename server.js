@@ -1,3 +1,4 @@
+const fetch = require("node-fetch");
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -13,14 +14,18 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 const CLIENT_SUCCESS_URL = process.env.CLIENT_SUCCESS_URL;
 const CLIENT_CANCEL_URL = process.env.CLIENT_CANCEL_URL;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
+const SUPABASE_KEY = (process.env.SUPABASE_KEY || "").trim();
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error("SUPABASE_URL ou SUPABASE_KEY não configuradas.");
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  global: {
+    fetch
+  }
+});
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 app.use(cors());
