@@ -365,6 +365,49 @@ async function chamarOpenAI(systemPrompt, userPrompt) {
   return texto;
 }
 
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    mensagem: "TalkGlobal backend online."
+  });
+});
+
+app.get("/debug/env", (req, res) => {
+  res.json({
+    supabaseUrl: SUPABASE_URL,
+    supabaseUrlLength: SUPABASE_URL.length,
+    supabaseUrlChars: [...SUPABASE_URL].map((c) => c.charCodeAt(0)),
+    supabaseKeyStartsWithEyJ: SUPABASE_KEY.startsWith("eyJ"),
+    supabaseKeyLength: SUPABASE_KEY.length
+  });
+});
+
+app.get("/debug/supabase", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("users").select("*").limit(1);
+
+    if (error) {
+      return res.status(500).json({
+        ok: false,
+        tipo: "supabase_error",
+        erro: error.message
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mensagem: "Conectou no Supabase",
+      total: Array.isArray(data) ? data.length : 0
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      tipo: "catch",
+      erro: error.message
+    });
+  }
+});
+
 app.post("/criar-usuario", async (req, res) => {
   try {
     const { email } = req.body || {};
@@ -406,14 +449,6 @@ app.post("/criar-usuario", async (req, res) => {
       erro: error.message || "Erro ao criar usuário."
     });
   }
-});
-
-app.get("/", (req, res) => {
-  res.json({
-    supabaseUrl: SUPABASE_URL,
-    length: SUPABASE_URL.length,
-    chars: [...SUPABASE_URL].map((c) => c.charCodeAt(0))
-  });
 });
 
 app.get("/meu-status", verificarAcesso, async (req, res) => {
