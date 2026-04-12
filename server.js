@@ -26,6 +26,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
     fetch
   }
 });
+
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 app.use(cors());
@@ -237,6 +238,7 @@ async function atualizarUsuarioPorStripeCustomerId(customerId, campos) {
 
 async function criarUsuario({ email }) {
   const agora = new Date();
+
   const payload = {
     access_key: gerarAccessKey(),
     email: email || null,
@@ -410,21 +412,22 @@ app.get("/", (req, res) => {
   res.json({
     supabaseUrl: SUPABASE_URL,
     length: SUPABASE_URL.length,
-    chars: [...SUPABASE_URL].map(c => c.charCodeAt(0))
+    chars: [...SUPABASE_URL].map((c) => c.charCodeAt(0))
   });
 });
-    }
+
+app.get("/meu-status", verificarAcesso, async (req, res) => {
+  try {
+    const usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
 
     return res.json({
       ok: true,
-      mensagem: "Conectou no Supabase",
-      total: data.length
+      usuario: mapearUsuarioDoBanco(usuario)
     });
   } catch (error) {
+    console.error("Erro em /meu-status:", error);
     return res.status(500).json({
-      ok: false,
-      tipo: "catch",
-      erro: error.message
+      erro: error.message || "Erro ao consultar status."
     });
   }
 });
