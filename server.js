@@ -369,10 +369,7 @@ app.post("/criar-usuario", (req, res) => {
 app.get("/meu-status", verificarAcesso, (req, res) => {
   return res.json({
     ok: true,
-    usuario: {
-      ...req.tgUser,
-      status: "blocked"
-    }
+    usuario: req.tgUser
   });
 });
 
