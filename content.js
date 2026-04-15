@@ -144,12 +144,12 @@
     return dados.resultado || "";
   }
 
-  async function criarCheckoutSession() {
+  async function criarCheckoutSession(plan) {
     const accessKey = await garantirKey();
 
     const dados = await postJSON(
       "/create-checkout-session",
-      { accessKey },
+      { accessKey, plan },
       false
     );
 
@@ -185,15 +185,21 @@
       <div id="tg-body">
         <div id="tg-paywall" class="tg-hidden">
           <div id="tg-paywall-badge">ACESSO BLOQUEADO</div>
-          <div id="tg-paywall-title">Desbloqueie o TalkGlobal</div>
+          <div id="tg-paywall-title">Escolha seu plano</div>
           <div id="tg-paywall-text">
             Seu trial terminou ou seu acesso não está ativo.
-            Libere agora e continue usando tradução e respostas em inglês.
+            Escolha um plano para continuar usando tradução e respostas em inglês.
           </div>
 
-          <button id="tg-pay-btn" class="tg-btn tg-btn-green">
-            🚀 Liberar acesso
-          </button>
+          <div id="tg-plans">
+            <button id="tg-plan-basic-btn" class="tg-btn tg-btn-blue">
+              Basic — R$39/mês
+            </button>
+
+            <button id="tg-plan-pro-btn" class="tg-btn tg-btn-green">
+              Pro — R$98/mês
+            </button>
+          </div>
 
           <button id="tg-refresh-status-btn" class="tg-btn tg-btn-dark">
             Atualizar status
@@ -357,6 +363,12 @@
         margin-top: 16px;
       }
 
+      #tg-plans {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
       .tg-btn {
         flex: 1;
         padding: 14px;
@@ -454,7 +466,8 @@
 
     document.querySelector("#tg-btn-traduzir")?.addEventListener("click", aoClicarTraduzir);
     document.querySelector("#tg-btn-converter")?.addEventListener("click", aoClicarConverter);
-    document.querySelector("#tg-pay-btn")?.addEventListener("click", aoClicarLiberarAcesso);
+    document.querySelector("#tg-plan-basic-btn")?.addEventListener("click", () => aoClicarLiberarAcesso("basic"));
+    document.querySelector("#tg-plan-pro-btn")?.addEventListener("click", () => aoClicarLiberarAcesso("pro"));
     document.querySelector("#tg-refresh-status-btn")?.addEventListener("click", atualizarStatusEInterface);
 
     const input = document.querySelector("#tg-input");
@@ -496,7 +509,8 @@
     const ids = [
       "#tg-btn-traduzir",
       "#tg-btn-converter",
-      "#tg-pay-btn",
+      "#tg-plan-basic-btn",
+      "#tg-plan-pro-btn",
       "#tg-refresh-status-btn"
     ];
 
@@ -645,13 +659,13 @@
     composer.focus();
   }
 
-  function atualizarInterfacePorStatus(status) {
-    CURRENT_STATUS = status;
+  function atualizarInterfacePorStatus(usuario) {
+    CURRENT_STATUS = usuario?.status || null;
 
     const paywall = document.querySelector("#tg-paywall");
     const app = document.querySelector("#tg-app");
 
-    const liberado = status === "trial" || status === "active";
+    const liberado = CURRENT_STATUS === "trial" || CURRENT_STATUS === "active";
 
     if (paywall) {
       paywall.classList.toggle("tg-hidden", liberado);
@@ -661,12 +675,14 @@
       app.classList.toggle("tg-hidden", !liberado);
     }
 
-    if (status === "active") {
-      setStatus("Acesso ativo. Tudo liberado.");
-    } else if (status === "trial") {
+    const plano = usuario?.plan || "free";
+
+    if (CURRENT_STATUS === "active") {
+      setStatus(`Acesso ativo. Plano: ${plano}.`);
+    } else if (CURRENT_STATUS === "trial") {
       setStatus("Trial ativo. Você pode usar normalmente.");
-    } else if (status === "blocked") {
-      setStatus("Acesso bloqueado. Faça o pagamento para liberar.");
+    } else if (CURRENT_STATUS === "blocked") {
+      setStatus("Acesso bloqueado. Escolha um plano para liberar.");
     } else {
       setStatus("Não foi possível validar seu acesso.");
     }
@@ -678,9 +694,7 @@
       setStatus("Verificando status...");
 
       const dados = await getStatusUsuario();
-      const status = dados?.usuario?.status || null;
-
-      atualizarInterfacePorStatus(status);
+      atualizarInterfacePorStatus(dados?.usuario || null);
     } catch (error) {
       const msg = String(error.message || "");
 
@@ -689,7 +703,7 @@
         msg.includes("Acesso bloqueado") ||
         msg.includes("Seu acesso não está liberado")
       ) {
-        atualizarInterfacePorStatus("blocked");
+        atualizarInterfacePorStatus({ status: "blocked", plan: "free" });
         return;
       }
 
@@ -700,12 +714,12 @@
     }
   }
 
-  async function aoClicarLiberarAcesso() {
+  async function aoClicarLiberarAcesso(plan) {
     try {
       setBotoesDesabilitados(true);
-      setStatus("Abrindo checkout...");
+      setStatus(`Abrindo plano ${plan}...`);
 
-      const checkoutUrl = await criarCheckoutSession();
+      const checkoutUrl = await criarCheckoutSession(plan);
       window.open(checkoutUrl, "_blank");
 
       setStatus("Checkout aberto. Após pagar, clique em Atualizar status.");
@@ -721,7 +735,7 @@
   async function aoClicarTraduzir() {
     try {
       if (!(CURRENT_STATUS === "trial" || CURRENT_STATUS === "active")) {
-        atualizarInterfacePorStatus("blocked");
+        atualizarInterfacePorStatus({ status: "blocked", plan: "free" });
         return;
       }
 
@@ -753,7 +767,7 @@
         String(error.message || "").includes("Seu período de teste terminou") ||
         String(error.message || "").includes("Acesso bloqueado")
       ) {
-        atualizarInterfacePorStatus("blocked");
+        atualizarInterfacePorStatus({ status: "blocked", plan: "free" });
         return;
       }
 
@@ -766,7 +780,7 @@
   async function aoClicarConverter() {
     try {
       if (!(CURRENT_STATUS === "trial" || CURRENT_STATUS === "active")) {
-        atualizarInterfacePorStatus("blocked");
+        atualizarInterfacePorStatus({ status: "blocked", plan: "free" });
         return;
       }
 
@@ -806,7 +820,7 @@
         String(error.message || "").includes("Seu período de teste terminou") ||
         String(error.message || "").includes("Acesso bloqueado")
       ) {
-        atualizarInterfacePorStatus("blocked");
+        atualizarInterfacePorStatus({ status: "blocked", plan: "free" });
         return;
       }
 
