@@ -540,7 +540,6 @@ app.post("/create-checkout-session", async (req, res) => {
       success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: CLIENT_CANCEL_URL,
       subscription_data: {
-        trial_period_days: 3,
         metadata: {
           accessKey,
           plan: selectedPlan.key
