@@ -4,6 +4,7 @@ const cors = require("cors");
 const crypto = require("crypto");
 const Stripe = require("stripe");
 const { createClient } = require("@supabase/supabase-js");
+const { getPlan } = require("./plans");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,7 +12,6 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 const CLIENT_SUCCESS_URL = process.env.CLIENT_SUCCESS_URL;
 const CLIENT_CANCEL_URL = process.env.CLIENT_CANCEL_URL;
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
@@ -55,11 +55,13 @@ app.post(
         const accessKey = objeto?.metadata?.accessKey;
         const customerId = objeto?.customer || null;
         const subscriptionId = objeto?.subscription || null;
+        const plan = objeto?.metadata?.plan || null;
 
         if (accessKey) {
           await atualizarUsuarioPorAccessKey(accessKey, {
             stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId
+            stripe_subscription_id: subscriptionId,
+            plan: plan || "free"
           });
         }
       }
@@ -72,10 +74,18 @@ app.post(
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
         const status = subscription.status;
+        const plan =
+          subscription?.metadata?.plan ||
+          subscription?.items?.data?.[0]?.price?.metadata?.plan ||
+          null;
 
         const campos = {
           stripe_subscription_id: subscriptionId
         };
+
+        if (plan) {
+          campos.plan = plan;
+        }
 
         if (status === "trialing") {
           campos.status = "trial";
@@ -103,7 +113,8 @@ app.post(
 
         await atualizarUsuarioPorStripeCustomerId(customerId, {
           status: "blocked",
-          stripe_subscription_id: subscription.id || null
+          stripe_subscription_id: subscription.id || null,
+          plan: "free"
         });
       }
 
@@ -140,7 +151,8 @@ function garantirOpenAIKey(res) {
 function garantirStripeConfig(res) {
   if (
     !STRIPE_SECRET_KEY ||
-    !STRIPE_PRICE_ID ||
+    !process.env.STRIPE_PRICE_BASIC ||
+    !process.env.STRIPE_PRICE_PRO ||
     !CLIENT_SUCCESS_URL ||
     !CLIENT_CANCEL_URL ||
     !stripe
@@ -160,6 +172,7 @@ function mapearUsuarioDoBanco(user) {
     key: user.access_key,
     email: user.email,
     status: user.status,
+    plan: user.plan || "free",
     trialEndsAt: user.trial_ends_at,
     stripeCustomerId: user.stripe_customer_id,
     stripeSubscriptionId: user.stripe_subscription_id,
@@ -243,6 +256,7 @@ async function criarUsuario({ email }) {
     access_key: gerarAccessKey(),
     email: email || null,
     status: "trial",
+    plan: "free",
     trial_ends_at: adicionarDias(agora, 3).toISOString(),
     stripe_customer_id: null,
     stripe_subscription_id: null,
@@ -427,6 +441,7 @@ app.post("/criar-usuario", async (req, res) => {
         accessKey: usuarioExistente.access_key,
         email: usuarioExistente.email,
         status: usuarioExistente.status,
+        plan: usuarioExistente.plan || "free",
         trialEndsAt: usuarioExistente.trial_ends_at,
         stripeCustomerId: usuarioExistente.stripe_customer_id,
         stripeSubscriptionId: usuarioExistente.stripe_subscription_id
@@ -439,6 +454,7 @@ app.post("/criar-usuario", async (req, res) => {
       accessKey: usuario.access_key,
       email: usuario.email,
       status: usuario.status,
+      plan: usuario.plan || "free",
       trialEndsAt: usuario.trial_ends_at,
       stripeCustomerId: usuario.stripe_customer_id,
       stripeSubscriptionId: usuario.stripe_subscription_id
@@ -471,13 +487,21 @@ app.post("/create-checkout-session", async (req, res) => {
   try {
     if (!garantirStripeConfig(res)) return;
 
-    const { accessKey } = req.body || {};
+    const { accessKey, plan } = req.body || {};
 
     if (!accessKey || typeof accessKey !== "string") {
       return res.status(400).json({
         erro: "accessKey obrigatória."
       });
     }
+
+    if (!plan || typeof plan !== "string") {
+      return res.status(400).json({
+        erro: "Plano obrigatório."
+      });
+    }
+
+    const selectedPlan = getPlan(plan);
 
     const user = await buscarUsuarioPorAccessKey(accessKey);
 
@@ -509,7 +533,7 @@ app.post("/create-checkout-session", async (req, res) => {
       customer: customerId,
       line_items: [
         {
-          price: STRIPE_PRICE_ID,
+          price: selectedPlan.priceId,
           quantity: 1
         }
       ],
@@ -518,11 +542,13 @@ app.post("/create-checkout-session", async (req, res) => {
       subscription_data: {
         trial_period_days: 3,
         metadata: {
-          accessKey
+          accessKey,
+          plan: selectedPlan.key
         }
       },
       metadata: {
-        accessKey
+        accessKey,
+        plan: selectedPlan.key
       }
     });
 
