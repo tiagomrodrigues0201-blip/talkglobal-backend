@@ -14,14 +14,19 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const CLIENT_SUCCESS_URL = process.env.CLIENT_SUCCESS_URL;
 const CLIENT_CANCEL_URL = process.env.CLIENT_CANCEL_URL;
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
-const SUPABASE_KEY = (process.env.SUPABASE_KEY || "").trim();
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  throw new Error("SUPABASE_URL ou SUPABASE_KEY não configuradas.");
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
+const SUPABASE_SERVICE_ROLE_KEY = (
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_KEY ||
+  ""
+).trim();
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configuradas.");
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   global: {
     fetch
   }
@@ -52,12 +57,19 @@ app.post(
       const objeto = event.data.object;
 
       if (tipo === "checkout.session.completed") {
-        const accessKey = objeto?.metadata?.accessKey;
+        const authUserId = objeto?.metadata?.authUserId || null;
+        const accessKey = objeto?.metadata?.accessKey || null;
         const customerId = objeto?.customer || null;
         const subscriptionId = objeto?.subscription || null;
         const plan = objeto?.metadata?.plan || null;
 
-        if (accessKey) {
+        if (authUserId) {
+          await atualizarUsuarioPorAuthUserId(authUserId, {
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subscriptionId,
+            plan: plan || "free"
+          });
+        } else if (accessKey) {
           await atualizarUsuarioPorAccessKey(accessKey, {
             stripe_customer_id: customerId,
             stripe_subscription_id: subscriptionId,
@@ -74,10 +86,19 @@ app.post(
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
         const status = subscription.status;
-        const plan =
-          subscription?.metadata?.plan ||
-          subscription?.items?.data?.[0]?.price?.metadata?.plan ||
-          null;
+        const authUserId = subscription?.metadata?.authUserId || null;
+
+        let plan = subscription?.metadata?.plan || null;
+
+        if (!plan) {
+          const priceId = subscription?.items?.data?.[0]?.price?.id || null;
+
+          if (priceId === process.env.STRIPE_PRICE_BASIC) {
+            plan = "basic";
+          } else if (priceId === process.env.STRIPE_PRICE_PRO) {
+            plan = "pro";
+          }
+        }
 
         const campos = {
           stripe_subscription_id: subscriptionId
@@ -99,23 +120,35 @@ app.post(
           status === "canceled" ||
           status === "unpaid" ||
           status === "incomplete_expired" ||
-          status === "paused"
+          status === "paused" ||
+          status === "incomplete"
         ) {
           campos.status = "blocked";
         }
 
-        await atualizarUsuarioPorStripeCustomerId(customerId, campos);
+        if (authUserId) {
+          await atualizarUsuarioPorAuthUserId(authUserId, campos);
+        } else {
+          await atualizarUsuarioPorStripeCustomerId(customerId, campos);
+        }
       }
 
       if (tipo === "customer.subscription.deleted") {
         const subscription = objeto;
         const customerId = subscription.customer;
+        const authUserId = subscription?.metadata?.authUserId || null;
 
-        await atualizarUsuarioPorStripeCustomerId(customerId, {
+        const campos = {
           status: "blocked",
           stripe_subscription_id: subscription.id || null,
           plan: "free"
-        });
+        };
+
+        if (authUserId) {
+          await atualizarUsuarioPorAuthUserId(authUserId, campos);
+        } else {
+          await atualizarUsuarioPorStripeCustomerId(customerId, campos);
+        }
       }
 
       return res.json({ received: true });
@@ -169,7 +202,9 @@ function mapearUsuarioDoBanco(user) {
   if (!user) return null;
 
   return {
-    key: user.access_key,
+    id: user.id,
+    authUserId: user.auth_user_id || null,
+    key: user.access_key || null,
     email: user.email,
     status: user.status,
     plan: user.plan || "free",
@@ -209,6 +244,20 @@ async function buscarUsuarioPorEmail(email) {
   return data;
 }
 
+async function buscarUsuarioPorAuthUserId(authUserId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("auth_user_id", authUserId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao buscar usuário por auth_user_id: ${error.message}`);
+  }
+
+  return data;
+}
+
 async function atualizarUsuarioPorAccessKey(accessKey, campos) {
   const { data, error } = await supabase
     .from("users")
@@ -222,6 +271,24 @@ async function atualizarUsuarioPorAccessKey(accessKey, campos) {
 
   if (error) {
     throw new Error(`Erro ao atualizar usuário por access_key: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function atualizarUsuarioPorAuthUserId(authUserId, campos) {
+  const { data, error } = await supabase
+    .from("users")
+    .update({
+      ...campos,
+      updated_at: new Date().toISOString()
+    })
+    .eq("auth_user_id", authUserId)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao atualizar usuário por auth_user_id: ${error.message}`);
   }
 
   return data;
@@ -249,11 +316,12 @@ async function atualizarUsuarioPorStripeCustomerId(customerId, campos) {
   return data;
 }
 
-async function criarUsuario({ email }) {
+async function criarUsuarioLegacy({ email }) {
   const agora = new Date();
 
   const payload = {
     access_key: gerarAccessKey(),
+    auth_user_id: null,
     email: email || null,
     status: "trial",
     plan: "free",
@@ -270,13 +338,135 @@ async function criarUsuario({ email }) {
     .single();
 
   if (error) {
-    throw new Error(`Erro ao criar usuário: ${error.message}`);
+    throw new Error(`Erro ao criar usuário legacy: ${error.message}`);
   }
 
   return data;
 }
 
-async function verificarAcesso(req, res, next) {
+async function criarOuVincularUsuarioAuth(authUser) {
+  if (!authUser?.id || !authUser?.email) {
+    throw new Error("Usuário autenticado inválido.");
+  }
+
+  const emailLimpo = String(authUser.email).trim().toLowerCase();
+
+  let usuario = await buscarUsuarioPorAuthUserId(authUser.id);
+  if (usuario) {
+    if (usuario.email !== emailLimpo) {
+      usuario = await atualizarUsuarioPorAuthUserId(authUser.id, {
+        email: emailLimpo
+      });
+    }
+    return usuario;
+  }
+
+  const usuarioPorEmail = await buscarUsuarioPorEmail(emailLimpo);
+  if (usuarioPorEmail) {
+    const atualizado = await supabase
+      .from("users")
+      .update({
+        auth_user_id: authUser.id,
+        email: emailLimpo,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", usuarioPorEmail.id)
+      .select()
+      .single();
+
+    if (atualizado.error) {
+      throw new Error(`Erro ao vincular usuário auth: ${atualizado.error.message}`);
+    }
+
+    return atualizado.data;
+  }
+
+  const agora = new Date();
+
+  const payload = {
+    auth_user_id: authUser.id,
+    access_key: gerarAccessKey(),
+    email: emailLimpo,
+    status: "trial",
+    plan: "free",
+    trial_ends_at: adicionarDias(agora, 3).toISOString(),
+    stripe_customer_id: null,
+    stripe_subscription_id: null,
+    updated_at: agora.toISOString()
+  };
+
+  const { data, error } = await supabase
+    .from("users")
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Erro ao criar usuário auth: ${error.message}`);
+  }
+
+  return data;
+}
+
+function validarStatusDoUsuario(user) {
+  if (!user) {
+    return {
+      ok: false,
+      statusCode: 403,
+      erro: "Acesso não autorizado."
+    };
+  }
+
+  if (user.status === "blocked") {
+    return {
+      ok: false,
+      statusCode: 403,
+      erro: "Acesso bloqueado."
+    };
+  }
+
+  if (user.status === "trial") {
+    if (!user.trial_ends_at) {
+      return {
+        ok: false,
+        statusCode: 403,
+        erro: "Trial inválido."
+      };
+    }
+
+    const agora = new Date();
+    const fim = new Date(user.trial_ends_at);
+
+    if (Number.isNaN(fim.getTime())) {
+      return {
+        ok: false,
+        statusCode: 403,
+        erro: "Data de trial inválida."
+      };
+    }
+
+    if (agora > fim) {
+      return {
+        ok: false,
+        statusCode: 403,
+        erro: "Seu período de teste terminou.",
+        expiredTrial: true
+      };
+    }
+  }
+
+  if (user.status !== "active" && user.status !== "trial") {
+    return {
+      ok: false,
+      statusCode: 403,
+      erro: "Seu acesso não está liberado."
+    };
+  }
+
+  return { ok: true };
+}
+
+async function verificarAcessoLegacy(req, res, next) {
   try {
     const userKey = (req.headers["x-talkglobal-key"] || "").trim();
 
@@ -294,51 +484,76 @@ async function verificarAcesso(req, res, next) {
       });
     }
 
-    if (user.status === "blocked") {
-      return res.status(403).json({
-        erro: "Acesso bloqueado."
-      });
-    }
+    const validacao = validarStatusDoUsuario(user);
 
-    if (user.status === "trial") {
-      if (!user.trial_ends_at) {
-        return res.status(403).json({
-          erro: "Trial inválido."
-        });
-      }
-
-      const agora = new Date();
-      const fim = new Date(user.trial_ends_at);
-
-      if (Number.isNaN(fim.getTime())) {
-        return res.status(403).json({
-          erro: "Data de trial inválida."
-        });
-      }
-
-      if (agora > fim) {
+    if (!validacao.ok) {
+      if (validacao.expiredTrial) {
         await atualizarUsuarioPorAccessKey(userKey, {
           status: "blocked"
         });
-
-        return res.status(403).json({
-          erro: "Seu período de teste terminou."
-        });
       }
-    }
 
-    if (user.status !== "active" && user.status !== "trial") {
-      return res.status(403).json({
-        erro: "Seu acesso não está liberado."
+      return res.status(validacao.statusCode).json({
+        erro: validacao.erro
       });
     }
 
     req.tgUser = mapearUsuarioDoBanco(user);
     next();
   } catch (error) {
-    console.error("Erro em verificarAcesso:", error);
+    console.error("Erro em verificarAcessoLegacy:", error);
     return res.status(500).json({
       erro: "Erro interno ao validar acesso."
+    });
+  }
+}
+
+async function verificarAuth(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : "";
+
+    if (!token) {
+      return res.status(401).json({
+        erro: "Token não enviado."
+      });
+    }
+
+    const {
+      data: { user },
+      error
+    } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(401).json({
+        erro: "Token inválido."
+      });
+    }
+
+    let dbUser = await criarOuVincularUsuarioAuth(user);
+    const validacao = validarStatusDoUsuario(dbUser);
+
+    if (!validacao.ok) {
+      if (validacao.expiredTrial) {
+        dbUser = await atualizarUsuarioPorAuthUserId(user.id, {
+          status: "blocked"
+        });
+      }
+
+      return res.status(validacao.statusCode).json({
+        erro: validacao.erro
+      });
+    }
+
+    req.authUser = user;
+    req.dbUser = mapearUsuarioDoBanco(dbUser);
+    next();
+  } catch (error) {
+    console.error("Erro em verificarAuth:", error);
+    return res.status(500).json({
+      erro: "Erro interno ao validar autenticação."
     });
   }
 }
@@ -390,15 +605,15 @@ app.get("/debug/env", (req, res) => {
   res.json({
     supabaseUrl: SUPABASE_URL,
     supabaseUrlLength: SUPABASE_URL.length,
-    supabaseUrlChars: [...SUPABASE_URL].map((c) => c.charCodeAt(0)),
-    supabaseKeyStartsWithEyJ: SUPABASE_KEY.startsWith("eyJ"),
-    supabaseKeyLength: SUPABASE_KEY.length
+    supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+    stripeConfigured: Boolean(STRIPE_SECRET_KEY),
+    webhookConfigured: Boolean(STRIPE_WEBHOOK_SECRET)
   });
 });
 
 app.get("/debug/supabase", async (req, res) => {
   try {
-    const { data, error } = await supabase.from("users").select("*").limit(1);
+    const { data, error } = await supabase.from("users").select("*").limit(3);
 
     if (error) {
       return res.status(500).json({
@@ -411,7 +626,8 @@ app.get("/debug/supabase", async (req, res) => {
     return res.json({
       ok: true,
       mensagem: "Conectou no Supabase",
-      total: Array.isArray(data) ? data.length : 0
+      total: Array.isArray(data) ? data.length : 0,
+      rows: data || []
     });
   } catch (error) {
     return res.status(500).json({
@@ -422,6 +638,11 @@ app.get("/debug/supabase", async (req, res) => {
   }
 });
 
+/**
+ * LEGACY
+ * Mantido temporariamente para sua extensão antiga continuar funcionando
+ * até trocarmos o content.js para login real.
+ */
 app.post("/criar-usuario", async (req, res) => {
   try {
     const { email } = req.body || {};
@@ -448,7 +669,7 @@ app.post("/criar-usuario", async (req, res) => {
       });
     }
 
-    const usuario = await criarUsuario({ email: emailLimpo });
+    const usuario = await criarUsuarioLegacy({ email: emailLimpo });
 
     return res.json({
       accessKey: usuario.access_key,
@@ -467,25 +688,223 @@ app.post("/criar-usuario", async (req, res) => {
   }
 });
 
-app.get("/meu-status", verificarAcesso, async (req, res) => {
+/**
+ * NOVO
+ * Garante que o usuário autenticado exista/vincule na tabela users.
+ */
+app.post("/auth/sync", verificarAuth, async (req, res) => {
   try {
-    const usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
+    const usuario = await buscarUsuarioPorAuthUserId(req.authUser.id);
 
     return res.json({
       ok: true,
       usuario: mapearUsuarioDoBanco(usuario)
     });
   } catch (error) {
-    console.error("Erro em /meu-status:", error);
+    console.error("Erro em /auth/sync:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao consultar status."
+      erro: error.message || "Erro ao sincronizar usuário."
     });
   }
 });
 
+/**
+ * LEGACY
+ */
+app.get("/meu-status", async (req, res, next) => {
+  const authHeader = req.headers.authorization || "";
+
+  if (authHeader.startsWith("Bearer ")) {
+    return verificarAuth(req, res, async () => {
+      try {
+        const usuario = await buscarUsuarioPorAuthUserId(req.authUser.id);
+
+        return res.json({
+          ok: true,
+          usuario: mapearUsuarioDoBanco(usuario)
+        });
+      } catch (error) {
+        console.error("Erro em /meu-status (auth):", error);
+        return res.status(500).json({
+          erro: error.message || "Erro ao consultar status."
+        });
+      }
+    });
+  }
+
+  return verificarAcessoLegacy(req, res, async () => {
+    try {
+      const usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
+
+      return res.json({
+        ok: true,
+        usuario: mapearUsuarioDoBanco(usuario)
+      });
+    } catch (error) {
+      console.error("Erro em /meu-status (legacy):", error);
+      return res.status(500).json({
+        erro: error.message || "Erro ao consultar status."
+      });
+    }
+  });
+});
+
+/**
+ * NOVO
+ * Checkout autenticado por Bearer token
+ */
+app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
+  try {
+    if (!garantirStripeConfig(res)) return;
+
+    const { plan } = req.body || {};
+
+    if (!plan || typeof plan !== "string") {
+      return res.status(400).json({
+        erro: "Plano obrigatório."
+      });
+    }
+
+    const selectedPlan = getPlan(plan);
+    const dbUser = await buscarUsuarioPorAuthUserId(req.authUser.id);
+
+    if (!dbUser) {
+      return res.status(404).json({
+        erro: "Usuário não encontrado."
+      });
+    }
+
+    let customerId = dbUser.stripe_customer_id;
+
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: req.authUser.email,
+        metadata: {
+          authUserId: req.authUser.id
+        }
+      });
+
+      customerId = customer.id;
+
+      await atualizarUsuarioPorAuthUserId(req.authUser.id, {
+        stripe_customer_id: customerId
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [
+        {
+          price: selectedPlan.priceId,
+          quantity: 1
+        }
+      ],
+      success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: CLIENT_CANCEL_URL,
+      subscription_data: {
+        metadata: {
+          authUserId: req.authUser.id,
+          plan: selectedPlan.key
+        }
+      },
+      metadata: {
+        authUserId: req.authUser.id,
+        plan: selectedPlan.key
+      }
+    });
+
+    return res.json({
+      checkoutUrl: session.url
+    });
+  } catch (error) {
+    console.error("Erro em /create-checkout-session-auth:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao criar checkout session."
+    });
+  }
+});
+
+/**
+ * LEGACY
+ * Mantido temporariamente
+ */
 app.post("/create-checkout-session", async (req, res) => {
   try {
     if (!garantirStripeConfig(res)) return;
+
+    const authHeader = req.headers.authorization || "";
+    if (authHeader.startsWith("Bearer ")) {
+      return verificarAuth(req, res, async () => {
+        try {
+          const { plan } = req.body || {};
+
+          if (!plan || typeof plan !== "string") {
+            return res.status(400).json({
+              erro: "Plano obrigatório."
+            });
+          }
+
+          const selectedPlan = getPlan(plan);
+          const dbUser = await buscarUsuarioPorAuthUserId(req.authUser.id);
+
+          if (!dbUser) {
+            return res.status(404).json({
+              erro: "Usuário não encontrado."
+            });
+          }
+
+          let customerId = dbUser.stripe_customer_id;
+
+          if (!customerId) {
+            const customer = await stripe.customers.create({
+              email: req.authUser.email,
+              metadata: {
+                authUserId: req.authUser.id
+              }
+            });
+
+            customerId = customer.id;
+
+            await atualizarUsuarioPorAuthUserId(req.authUser.id, {
+              stripe_customer_id: customerId
+            });
+          }
+
+          const session = await stripe.checkout.sessions.create({
+            mode: "subscription",
+            customer: customerId,
+            line_items: [
+              {
+                price: selectedPlan.priceId,
+                quantity: 1
+              }
+            ],
+            success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: CLIENT_CANCEL_URL,
+            subscription_data: {
+              metadata: {
+                authUserId: req.authUser.id,
+                plan: selectedPlan.key
+              }
+            },
+            metadata: {
+              authUserId: req.authUser.id,
+              plan: selectedPlan.key
+            }
+          });
+
+          return res.json({
+            checkoutUrl: session.url
+          });
+        } catch (error) {
+          console.error("Erro em /create-checkout-session (auth):", error);
+          return res.status(500).json({
+            erro: error.message || "Erro ao criar checkout session."
+          });
+        }
+      });
+    }
 
     const { accessKey, plan } = req.body || {};
 
@@ -502,7 +921,6 @@ app.post("/create-checkout-session", async (req, res) => {
     }
 
     const selectedPlan = getPlan(plan);
-
     const user = await buscarUsuarioPorAccessKey(accessKey);
 
     if (!user) {
@@ -562,19 +980,27 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-app.post("/traduzir", verificarAcesso, async (req, res) => {
-  try {
-    if (!garantirOpenAIKey(res)) return;
+/**
+ * Rotas protegidas:
+ * aceitam Bearer token novo
+ * ou x-talkglobal-key legado
+ */
+app.post("/traduzir", async (req, res) => {
+  const authHeader = req.headers.authorization || "";
 
-    const { texto } = req.body;
+  const executar = async () => {
+    try {
+      if (!garantirOpenAIKey(res)) return;
 
-    if (!texto || typeof texto !== "string" || !texto.trim()) {
-      return res.status(400).json({
-        erro: "Texto inválido para tradução."
-      });
-    }
+      const { texto } = req.body;
 
-    const systemPrompt = `
+      if (!texto || typeof texto !== "string" || !texto.trim()) {
+        return res.status(400).json({
+          erro: "Texto inválido para tradução."
+        });
+      }
+
+      const systemPrompt = `
 Você é um tradutor profissional.
 Traduza a mensagem para português do Brasil de forma natural, clara e fiel.
 Se vierem várias mensagens seguidas, mantenha a ordem.
@@ -583,30 +1009,40 @@ Não adicione observações.
 Entregue só a tradução final.
 `.trim();
 
-    const resultado = await chamarOpenAI(systemPrompt, texto.trim());
+      const resultado = await chamarOpenAI(systemPrompt, texto.trim());
 
-    return res.json({ resultado });
-  } catch (error) {
-    console.error("Erro em /traduzir:", error);
-    return res.status(500).json({
-      erro: error.message || "Erro ao traduzir."
-    });
-  }
-});
-
-app.post("/converter", verificarAcesso, async (req, res) => {
-  try {
-    if (!garantirOpenAIKey(res)) return;
-
-    const { texto, contexto } = req.body;
-
-    if (!texto || typeof texto !== "string" || !texto.trim()) {
-      return res.status(400).json({
-        erro: "Texto inválido para conversão."
+      return res.json({ resultado });
+    } catch (error) {
+      console.error("Erro em /traduzir:", error);
+      return res.status(500).json({
+        erro: error.message || "Erro ao traduzir."
       });
     }
+  };
 
-    const systemPrompt = `
+  if (authHeader.startsWith("Bearer ")) {
+    return verificarAuth(req, res, executar);
+  }
+
+  return verificarAcessoLegacy(req, res, executar);
+});
+
+app.post("/converter", async (req, res) => {
+  const authHeader = req.headers.authorization || "";
+
+  const executar = async () => {
+    try {
+      if (!garantirOpenAIKey(res)) return;
+
+      const { texto, contexto } = req.body;
+
+      if (!texto || typeof texto !== "string" || !texto.trim()) {
+        return res.status(400).json({
+          erro: "Texto inválido para conversão."
+        });
+      }
+
+      const systemPrompt = `
 Você é um assistente que transforma respostas escritas em português
 em inglês natural, curto, claro e profissional para conversa no WhatsApp.
 
@@ -618,7 +1054,7 @@ Regras:
 - Considere o contexto da conversa, se ele existir.
 `.trim();
 
-    const userPrompt = `
+      const userPrompt = `
 CONTEXTO DA CONVERSA:
 ${contexto || "(sem contexto)"}
 
@@ -626,15 +1062,22 @@ RESPOSTA EM PORTUGUÊS:
 ${texto.trim()}
 `.trim();
 
-    const resultado = await chamarOpenAI(systemPrompt, userPrompt);
+      const resultado = await chamarOpenAI(systemPrompt, userPrompt);
 
-    return res.json({ resultado });
-  } catch (error) {
-    console.error("Erro em /converter:", error);
-    return res.status(500).json({
-      erro: error.message || "Erro ao converter."
-    });
+      return res.json({ resultado });
+    } catch (error) {
+      console.error("Erro em /converter:", error);
+      return res.status(500).json({
+        erro: error.message || "Erro ao converter."
+      });
+    }
+  };
+
+  if (authHeader.startsWith("Bearer ")) {
+    return verificarAuth(req, res, executar);
   }
+
+  return verificarAcessoLegacy(req, res, executar);
 });
 
 app.listen(PORT, () => {
