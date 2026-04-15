@@ -22,6 +22,10 @@ const SUPABASE_SERVICE_ROLE_KEY = (
   ""
 ).trim();
 
+const DEVICE_ID_HEADER = "x-talkglobal-device-id";
+const DEVICE_NAME_HEADER = "x-talkglobal-device-name";
+const DEVICE_ACTIVE_DAYS = 30;
+
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configuradas.");
 }
@@ -171,6 +175,21 @@ function adicionarDias(data, dias) {
   return novaData;
 }
 
+function getDeviceLimitForPlan(plan) {
+  const plano = String(plan || "free").toLowerCase();
+
+  if (plano === "pro") return 3;
+  if (plano === "basic") return 1;
+
+  return 1;
+}
+
+function getDeviceCutoffIso() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - DEVICE_ACTIVE_DAYS);
+  return cutoff.toISOString();
+}
+
 function garantirOpenAIKey(res) {
   if (!OPENAI_API_KEY) {
     res.status(500).json({
@@ -213,6 +232,20 @@ function mapearUsuarioDoBanco(user) {
     stripeSubscriptionId: user.stripe_subscription_id,
     createdAt: user.created_at,
     updatedAt: user.updated_at
+  };
+}
+
+function mapearDevice(device) {
+  if (!device) return null;
+
+  return {
+    id: device.id,
+    authUserId: device.auth_user_id,
+    deviceId: device.device_id,
+    deviceName: device.device_name,
+    lastSeenAt: device.last_seen_at,
+    createdAt: device.created_at,
+    updatedAt: device.updated_at
   };
 }
 
@@ -508,6 +541,137 @@ async function verificarAcessoLegacy(req, res, next) {
   }
 }
 
+async function removerDispositivosAntigos(authUserId) {
+  const cutoffIso = getDeviceCutoffIso();
+
+  const { error } = await supabase
+    .from("user_devices")
+    .delete()
+    .eq("auth_user_id", authUserId)
+    .lt("last_seen_at", cutoffIso);
+
+  if (error) {
+    throw new Error(`Erro ao remover dispositivos antigos: ${error.message}`);
+  }
+}
+
+async function buscarDispositivo(authUserId, deviceId) {
+  const { data, error } = await supabase
+    .from("user_devices")
+    .select("*")
+    .eq("auth_user_id", authUserId)
+    .eq("device_id", deviceId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao buscar dispositivo: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function listarDispositivosAtivos(authUserId) {
+  const cutoffIso = getDeviceCutoffIso();
+
+  const { data, error } = await supabase
+    .from("user_devices")
+    .select("*")
+    .eq("auth_user_id", authUserId)
+    .gte("last_seen_at", cutoffIso)
+    .order("last_seen_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Erro ao listar dispositivos ativos: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+async function upsertDispositivo(authUserId, deviceId, deviceName) {
+  const agora = new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("user_devices")
+    .upsert(
+      {
+        auth_user_id: authUserId,
+        device_id: deviceId,
+        device_name: deviceName || null,
+        last_seen_at: agora,
+        updated_at: agora
+      },
+      {
+        onConflict: "auth_user_id,device_id"
+      }
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Erro ao registrar dispositivo: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function validarLimiteDispositivos(user, deviceId, deviceName) {
+  if (!user?.auth_user_id) {
+    throw new Error("Usuário sem auth_user_id.");
+  }
+
+  if (!deviceId || typeof deviceId !== "string" || !deviceId.trim()) {
+    return {
+      ok: false,
+      statusCode: 400,
+      erro: "Dispositivo não identificado."
+    };
+  }
+
+  await removerDispositivosAntigos(user.auth_user_id);
+
+  const deviceIdLimpo = deviceId.trim();
+  const deviceExistente = await buscarDispositivo(user.auth_user_id, deviceIdLimpo);
+
+  if (deviceExistente) {
+    const atualizado = await upsertDispositivo(
+      user.auth_user_id,
+      deviceIdLimpo,
+      deviceName || deviceExistente.device_name || null
+    );
+
+    return {
+      ok: true,
+      dispositivo: atualizado,
+      limite: getDeviceLimitForPlan(user.plan)
+    };
+  }
+
+  const dispositivosAtivos = await listarDispositivosAtivos(user.auth_user_id);
+  const limite = getDeviceLimitForPlan(user.plan);
+
+  if (dispositivosAtivos.length >= limite) {
+    return {
+      ok: false,
+      statusCode: 403,
+      erro:
+        `Limite de dispositivos atingido para o plano ${user.plan || "free"}. ` +
+        `Seu plano permite ${limite} dispositivo(s) ativo(s).`
+    };
+  }
+
+  const criado = await upsertDispositivo(
+    user.auth_user_id,
+    deviceIdLimpo,
+    deviceName || null
+  );
+
+  return {
+    ok: true,
+    dispositivo: criado,
+    limite
+  };
+}
+
 async function verificarAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
@@ -547,8 +711,25 @@ async function verificarAuth(req, res, next) {
       });
     }
 
+    const deviceId = (req.headers[DEVICE_ID_HEADER] || "").trim();
+    const deviceName = (req.headers[DEVICE_NAME_HEADER] || "").trim();
+
+    const validacaoDevice = await validarLimiteDispositivos(
+      dbUser,
+      deviceId,
+      deviceName
+    );
+
+    if (!validacaoDevice.ok) {
+      return res.status(validacaoDevice.statusCode).json({
+        erro: validacaoDevice.erro
+      });
+    }
+
     req.authUser = user;
     req.dbUser = mapearUsuarioDoBanco(dbUser);
+    req.device = mapearDevice(validacaoDevice.dispositivo);
+    req.deviceLimit = validacaoDevice.limite;
     next();
   } catch (error) {
     console.error("Erro em verificarAuth:", error);
@@ -638,11 +819,6 @@ app.get("/debug/supabase", async (req, res) => {
   }
 });
 
-/**
- * LEGACY
- * Mantido temporariamente para sua extensão antiga continuar funcionando
- * até trocarmos o content.js para login real.
- */
 app.post("/criar-usuario", async (req, res) => {
   try {
     const { email } = req.body || {};
@@ -688,17 +864,15 @@ app.post("/criar-usuario", async (req, res) => {
   }
 });
 
-/**
- * NOVO
- * Garante que o usuário autenticado exista/vincule na tabela users.
- */
 app.post("/auth/sync", verificarAuth, async (req, res) => {
   try {
     const usuario = await buscarUsuarioPorAuthUserId(req.authUser.id);
 
     return res.json({
       ok: true,
-      usuario: mapearUsuarioDoBanco(usuario)
+      usuario: mapearUsuarioDoBanco(usuario),
+      dispositivo: req.device,
+      limiteDispositivos: req.deviceLimit
     });
   } catch (error) {
     console.error("Erro em /auth/sync:", error);
@@ -708,10 +882,57 @@ app.post("/auth/sync", verificarAuth, async (req, res) => {
   }
 });
 
-/**
- * LEGACY
- */
-app.get("/meu-status", async (req, res, next) => {
+app.get("/auth/devices", verificarAuth, async (req, res) => {
+  try {
+    const dispositivos = await listarDispositivosAtivos(req.authUser.id);
+
+    return res.json({
+      ok: true,
+      limite: req.deviceLimit,
+      dispositivos: dispositivos.map(mapearDevice)
+    });
+  } catch (error) {
+    console.error("Erro em /auth/devices:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao listar dispositivos."
+    });
+  }
+});
+
+app.delete("/auth/devices/:deviceId", verificarAuth, async (req, res) => {
+  try {
+    const deviceId = String(req.params.deviceId || "").trim();
+
+    if (!deviceId) {
+      return res.status(400).json({
+        erro: "deviceId obrigatório."
+      });
+    }
+
+    const { error } = await supabase
+      .from("user_devices")
+      .delete()
+      .eq("auth_user_id", req.authUser.id)
+      .eq("device_id", deviceId);
+
+    if (error) {
+      return res.status(500).json({
+        erro: error.message || "Erro ao remover dispositivo."
+      });
+    }
+
+    return res.json({
+      ok: true
+    });
+  } catch (error) {
+    console.error("Erro em /auth/devices/:deviceId:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao remover dispositivo."
+    });
+  }
+});
+
+app.get("/meu-status", async (req, res) => {
   const authHeader = req.headers.authorization || "";
 
   if (authHeader.startsWith("Bearer ")) {
@@ -721,7 +942,9 @@ app.get("/meu-status", async (req, res, next) => {
 
         return res.json({
           ok: true,
-          usuario: mapearUsuarioDoBanco(usuario)
+          usuario: mapearUsuarioDoBanco(usuario),
+          dispositivo: req.device,
+          limiteDispositivos: req.deviceLimit
         });
       } catch (error) {
         console.error("Erro em /meu-status (auth):", error);
@@ -749,10 +972,6 @@ app.get("/meu-status", async (req, res, next) => {
   });
 });
 
-/**
- * NOVO
- * Checkout autenticado por Bearer token
- */
 app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
   try {
     if (!garantirStripeConfig(res)) return;
@@ -825,10 +1044,6 @@ app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
   }
 });
 
-/**
- * LEGACY
- * Mantido temporariamente
- */
 app.post("/create-checkout-session", async (req, res) => {
   try {
     if (!garantirStripeConfig(res)) return;
@@ -980,11 +1195,6 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-/**
- * Rotas protegidas:
- * aceitam Bearer token novo
- * ou x-talkglobal-key legado
- */
 app.post("/traduzir", async (req, res) => {
   const authHeader = req.headers.authorization || "";
 
