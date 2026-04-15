@@ -1,12 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "TalkGlobal Test",
-  "short_name": "TG Test",
-  "version": "1.0.0",
-  "description": "Versão de testes da extensão TalkGlobal.",
+  "name": "TalkGlobal",
+  "short_name": "TalkGlobal",
+  "version": "1.0.1",
+  "description": "Responda mensagens em inglês no WhatsApp com 1 clique.",
   "permissions": [
-    "activeTab",
-    "scripting",
     "storage"
   ],
   "host_permissions": [
@@ -15,8 +13,12 @@
   ],
   "content_scripts": [
     {
-      "matches": ["https://web.whatsapp.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -34,10 +36,12 @@
         "favicon-16x16.png",
         "favicon-32x32.png"
       ],
-      "matches": ["https://web.whatsapp.com/*"]
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ]
     }
   ],
   "action": {
-    "default_title": "TalkGlobal Test"
+    "default_title": "TalkGlobal"
   }
 }
