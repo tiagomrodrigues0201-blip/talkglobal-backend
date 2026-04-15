@@ -1,4 +1,4 @@
-export const PLANS = {
+const PLANS = {
   basic: {
     key: "basic",
     priceId: process.env.STRIPE_PRICE_BASIC
@@ -9,7 +9,7 @@ export const PLANS = {
   }
 };
 
-export function getPlan(plan) {
+function getPlan(plan) {
   const p = PLANS[String(plan).toLowerCase()];
 
   if (!p) {
@@ -18,3 +18,8 @@ export function getPlan(plan) {
 
   return p;
 }
+
+module.exports = {
+  PLANS,
+  getPlan
+};
