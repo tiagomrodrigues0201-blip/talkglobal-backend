@@ -630,6 +630,8 @@ async function validarLimiteDispositivos(user, deviceId, deviceName) {
   await removerDispositivosAntigos(user.auth_user_id);
 
   const deviceIdLimpo = deviceId.trim();
+  const limite = getDeviceLimitForPlan(user.plan);
+
   const deviceExistente = await buscarDispositivo(user.auth_user_id, deviceIdLimpo);
 
   if (deviceExistente) {
@@ -642,21 +644,30 @@ async function validarLimiteDispositivos(user, deviceId, deviceName) {
     return {
       ok: true,
       dispositivo: atualizado,
-      limite: getDeviceLimitForPlan(user.plan)
+      limite
     };
   }
 
   const dispositivosAtivos = await listarDispositivosAtivos(user.auth_user_id);
-  const limite = getDeviceLimitForPlan(user.plan);
 
   if (dispositivosAtivos.length >= limite) {
-    return {
-      ok: false,
-      statusCode: 403,
-      erro:
-        `Limite de dispositivos atingido para o plano ${user.plan || "free"}. ` +
-        `Seu plano permite ${limite} dispositivo(s) ativo(s).`
-    };
+    const removerQtd = (dispositivosAtivos.length - limite) + 1;
+
+    const antigos = dispositivosAtivos
+      .slice()
+      .sort((a, b) => new Date(a.last_seen_at) - new Date(b.last_seen_at))
+      .slice(0, removerQtd);
+
+    const idsParaRemover = antigos.map((d) => d.id);
+
+    const { error: deleteError } = await supabase
+      .from("user_devices")
+      .delete()
+      .in("id", idsParaRemover);
+
+    if (deleteError) {
+      throw new Error(`Erro ao remover dispositivo antigo: ${deleteError.message}`);
+    }
   }
 
   const criado = await upsertDispositivo(
