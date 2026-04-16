@@ -25,6 +25,7 @@ const SUPABASE_SERVICE_ROLE_KEY = (
 const DEVICE_ID_HEADER = "x-talkglobal-device-id";
 const DEVICE_NAME_HEADER = "x-talkglobal-device-name";
 const DEVICE_ACTIVE_DAYS = 30;
+const TRIAL_DAYS = 3;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configuradas.");
@@ -67,18 +68,19 @@ app.post(
         const subscriptionId = objeto?.subscription || null;
         const plan = objeto?.metadata?.plan || null;
 
+        const campos = {
+          stripe_customer_id: customerId,
+          stripe_subscription_id: subscriptionId
+        };
+
+        if (plan) {
+          campos.plan = plan;
+        }
+
         if (authUserId) {
-          await atualizarUsuarioPorAuthUserId(authUserId, {
-            stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId,
-            plan: plan || "free"
-          });
+          await atualizarUsuarioPorAuthUserId(authUserId, campos);
         } else if (accessKey) {
-          await atualizarUsuarioPorAccessKey(accessKey, {
-            stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId,
-            plan: plan || "free"
-          });
+          await atualizarUsuarioPorAccessKey(accessKey, campos);
         }
       }
 
@@ -128,6 +130,7 @@ app.post(
           status === "incomplete"
         ) {
           campos.status = "blocked";
+          campos.plan = null;
         }
 
         if (authUserId) {
@@ -145,7 +148,8 @@ app.post(
         const campos = {
           status: "blocked",
           stripe_subscription_id: subscription.id || null,
-          plan: "free"
+          plan: null,
+          trial_ends_at: null
         };
 
         if (authUserId) {
@@ -176,10 +180,11 @@ function adicionarDias(data, dias) {
 }
 
 function getDeviceLimitForPlan(plan) {
-  const plano = String(plan || "free").toLowerCase();
+  const plano = String(plan || "").toLowerCase();
 
   if (plano === "pro") return 3;
   if (plano === "basic") return 1;
+  if (plano === "trial") return 1;
 
   return 1;
 }
@@ -226,7 +231,7 @@ function mapearUsuarioDoBanco(user) {
     key: user.access_key || null,
     email: user.email,
     status: user.status,
-    plan: user.plan || "free",
+    plan: user.plan || null,
     trialEndsAt: user.trial_ends_at,
     stripeCustomerId: user.stripe_customer_id,
     stripeSubscriptionId: user.stripe_subscription_id,
@@ -357,8 +362,8 @@ async function criarUsuarioLegacy({ email }) {
     auth_user_id: null,
     email: email || null,
     status: "trial",
-    plan: "free",
-    trial_ends_at: adicionarDias(agora, 3).toISOString(),
+    plan: "trial",
+    trial_ends_at: adicionarDias(agora, TRIAL_DAYS).toISOString(),
     stripe_customer_id: null,
     stripe_subscription_id: null,
     updated_at: agora.toISOString()
@@ -421,8 +426,8 @@ async function criarOuVincularUsuarioAuth(authUser) {
     access_key: gerarAccessKey(),
     email: emailLimpo,
     status: "trial",
-    plan: "free",
-    trial_ends_at: adicionarDias(agora, 3).toISOString(),
+    plan: "trial",
+    trial_ends_at: adicionarDias(agora, TRIAL_DAYS).toISOString(),
     stripe_customer_id: null,
     stripe_subscription_id: null,
     updated_at: agora.toISOString()
@@ -454,7 +459,7 @@ function validarStatusDoUsuario(user) {
     return {
       ok: false,
       statusCode: 403,
-      erro: "Acesso bloqueado."
+      erro: "Seu período de teste terminou. Escolha um plano para continuar."
     };
   }
 
@@ -482,7 +487,7 @@ function validarStatusDoUsuario(user) {
       return {
         ok: false,
         statusCode: 403,
-        erro: "Seu período de teste terminou.",
+        erro: "Seu período de teste terminou. Escolha um plano para continuar.",
         expiredTrial: true
       };
     }
@@ -522,7 +527,8 @@ async function verificarAcessoLegacy(req, res, next) {
     if (!validacao.ok) {
       if (validacao.expiredTrial) {
         await atualizarUsuarioPorAccessKey(userKey, {
-          status: "blocked"
+          status: "blocked",
+          plan: null
         });
       }
 
@@ -631,7 +637,6 @@ async function validarLimiteDispositivos(user, deviceId, deviceName) {
 
   const deviceIdLimpo = deviceId.trim();
   const limite = getDeviceLimitForPlan(user.plan);
-
   const deviceExistente = await buscarDispositivo(user.auth_user_id, deviceIdLimpo);
 
   if (deviceExistente) {
@@ -713,7 +718,8 @@ async function verificarAuth(req, res, next) {
     if (!validacao.ok) {
       if (validacao.expiredTrial) {
         dbUser = await atualizarUsuarioPorAuthUserId(user.id, {
-          status: "blocked"
+          status: "blocked",
+          plan: null
         });
       }
 
@@ -841,7 +847,6 @@ app.post("/criar-usuario", async (req, res) => {
     }
 
     const emailLimpo = email.trim().toLowerCase();
-
     const usuarioExistente = await buscarUsuarioPorEmail(emailLimpo);
 
     if (usuarioExistente) {
@@ -849,7 +854,7 @@ app.post("/criar-usuario", async (req, res) => {
         accessKey: usuarioExistente.access_key,
         email: usuarioExistente.email,
         status: usuarioExistente.status,
-        plan: usuarioExistente.plan || "free",
+        plan: usuarioExistente.plan || null,
         trialEndsAt: usuarioExistente.trial_ends_at,
         stripeCustomerId: usuarioExistente.stripe_customer_id,
         stripeSubscriptionId: usuarioExistente.stripe_subscription_id
@@ -862,7 +867,7 @@ app.post("/criar-usuario", async (req, res) => {
       accessKey: usuario.access_key,
       email: usuario.email,
       status: usuario.status,
-      plan: usuario.plan || "free",
+      plan: usuario.plan || null,
       trialEndsAt: usuario.trial_ends_at,
       stripeCustomerId: usuario.stripe_customer_id,
       stripeSubscriptionId: usuario.stripe_subscription_id
@@ -1060,6 +1065,7 @@ app.post("/create-checkout-session", async (req, res) => {
     if (!garantirStripeConfig(res)) return;
 
     const authHeader = req.headers.authorization || "";
+
     if (authHeader.startsWith("Bearer ")) {
       return verificarAuth(req, res, async () => {
         try {
