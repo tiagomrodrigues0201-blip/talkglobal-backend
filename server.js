@@ -2,171 +2,29 @@ const fetch = require("node-fetch");
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
-const Stripe = require("stripe");
-const { createClient } = require("@supabase/supabase-js");
-const { getPlan } = require("./plans");
+
+const { supabase } = require("./lib/supabase");
+const {
+  PORT,
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  DEVICE_ID_HEADER,
+  DEVICE_NAME_HEADER,
+  DEVICE_ACTIVE_DAYS,
+  TRIAL_DAYS
+} = require("./lib/env");
+
+const {
+  HOTMART_PRODUCT_ID,
+  getHotmartCheckoutUrl,
+  getPlanoPorHotmart,
+  validarTokenHotmart
+} = require("./lib/hotmart");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-const CLIENT_SUCCESS_URL = process.env.CLIENT_SUCCESS_URL;
-const CLIENT_CANCEL_URL = process.env.CLIENT_CANCEL_URL;
-
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
-const SUPABASE_SERVICE_ROLE_KEY = (
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_KEY ||
-  ""
-).trim();
-
-const DEVICE_ID_HEADER = "x-talkglobal-device-id";
-const DEVICE_NAME_HEADER = "x-talkglobal-device-name";
-const DEVICE_ACTIVE_DAYS = 30;
-const TRIAL_DAYS = 3;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configuradas.");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  global: {
-    fetch
-  }
-});
-
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 app.use(cors());
-
-app.post(
-  "/stripe-webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    try {
-      if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-        return res.status(500).send("Stripe não configurado no servidor.");
-      }
-
-      const signature = req.headers["stripe-signature"];
-
-      const event = stripe.webhooks.constructEvent(
-        req.body,
-        signature,
-        STRIPE_WEBHOOK_SECRET
-      );
-
-      const tipo = event.type;
-      const objeto = event.data.object;
-
-      if (tipo === "checkout.session.completed") {
-        const authUserId = objeto?.metadata?.authUserId || null;
-        const accessKey = objeto?.metadata?.accessKey || null;
-        const customerId = objeto?.customer || null;
-        const subscriptionId = objeto?.subscription || null;
-        const plan = objeto?.metadata?.plan || null;
-
-        const campos = {
-          stripe_customer_id: customerId,
-          stripe_subscription_id: subscriptionId
-        };
-
-        if (plan) {
-          campos.plan = plan;
-        }
-
-        if (authUserId) {
-          await atualizarUsuarioPorAuthUserId(authUserId, campos);
-        } else if (accessKey) {
-          await atualizarUsuarioPorAccessKey(accessKey, campos);
-        }
-      }
-
-      if (
-        tipo === "customer.subscription.created" ||
-        tipo === "customer.subscription.updated"
-      ) {
-        const subscription = objeto;
-        const customerId = subscription.customer;
-        const subscriptionId = subscription.id;
-        const status = subscription.status;
-        const authUserId = subscription?.metadata?.authUserId || null;
-
-        let plan = subscription?.metadata?.plan || null;
-
-        if (!plan) {
-          const priceId = subscription?.items?.data?.[0]?.price?.id || null;
-
-          if (priceId === process.env.STRIPE_PRICE_BASIC) {
-            plan = "basic";
-          } else if (priceId === process.env.STRIPE_PRICE_PRO) {
-            plan = "pro";
-          }
-        }
-
-        const campos = {
-          stripe_subscription_id: subscriptionId
-        };
-
-        if (plan) {
-          campos.plan = plan;
-        }
-
-        if (status === "trialing") {
-          campos.status = "trial";
-          campos.trial_ends_at = subscription.trial_end
-            ? new Date(subscription.trial_end * 1000).toISOString()
-            : null;
-        } else if (status === "active") {
-          campos.status = "active";
-          campos.trial_ends_at = null;
-        } else if (
-          status === "canceled" ||
-          status === "unpaid" ||
-          status === "incomplete_expired" ||
-          status === "paused" ||
-          status === "incomplete"
-        ) {
-          campos.status = "blocked";
-          campos.plan = null;
-        }
-
-        if (authUserId) {
-          await atualizarUsuarioPorAuthUserId(authUserId, campos);
-        } else {
-          await atualizarUsuarioPorStripeCustomerId(customerId, campos);
-        }
-      }
-
-      if (tipo === "customer.subscription.deleted") {
-        const subscription = objeto;
-        const customerId = subscription.customer;
-        const authUserId = subscription?.metadata?.authUserId || null;
-
-        const campos = {
-          status: "blocked",
-          stripe_subscription_id: subscription.id || null,
-          plan: null,
-          trial_ends_at: null
-        };
-
-        if (authUserId) {
-          await atualizarUsuarioPorAuthUserId(authUserId, campos);
-        } else {
-          await atualizarUsuarioPorStripeCustomerId(customerId, campos);
-        }
-      }
-
-      return res.json({ received: true });
-    } catch (error) {
-      console.error("Erro no webhook Stripe:", error.message);
-      return res.status(400).send(`Webhook Error: ${error.message}`);
-    }
-  }
-);
-
 app.use(express.json({ limit: "1mb" }));
 
 function gerarAccessKey() {
@@ -181,11 +39,9 @@ function adicionarDias(data, dias) {
 
 function getDeviceLimitForPlan(plan) {
   const plano = String(plan || "").toLowerCase();
-
   if (plano === "pro") return 3;
   if (plano === "basic") return 1;
   if (plano === "trial") return 1;
-
   return 1;
 }
 
@@ -205,23 +61,6 @@ function garantirOpenAIKey(res) {
   return true;
 }
 
-function garantirStripeConfig(res) {
-  if (
-    !STRIPE_SECRET_KEY ||
-    !process.env.STRIPE_PRICE_BASIC ||
-    !process.env.STRIPE_PRICE_PRO ||
-    !CLIENT_SUCCESS_URL ||
-    !CLIENT_CANCEL_URL ||
-    !stripe
-  ) {
-    res.status(500).json({
-      erro: "Configuração Stripe incompleta no servidor."
-    });
-    return false;
-  }
-  return true;
-}
-
 function mapearUsuarioDoBanco(user) {
   if (!user) return null;
 
@@ -233,8 +72,8 @@ function mapearUsuarioDoBanco(user) {
     status: user.status,
     plan: user.plan || null,
     trialEndsAt: user.trial_ends_at,
-    stripeCustomerId: user.stripe_customer_id,
-    stripeSubscriptionId: user.stripe_subscription_id,
+    stripeCustomerId: user.stripe_customer_id || null,
+    stripeSubscriptionId: user.stripe_subscription_id || null,
     createdAt: user.created_at,
     updatedAt: user.updated_at
   };
@@ -332,28 +171,6 @@ async function atualizarUsuarioPorAuthUserId(authUserId, campos) {
   return data;
 }
 
-async function atualizarUsuarioPorStripeCustomerId(customerId, campos) {
-  if (!customerId) return null;
-
-  const { data, error } = await supabase
-    .from("users")
-    .update({
-      ...campos,
-      updated_at: new Date().toISOString()
-    })
-    .eq("stripe_customer_id", customerId)
-    .select()
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(
-      `Erro ao atualizar usuário por stripe_customer_id: ${error.message}`
-    );
-  }
-
-  return data;
-}
-
 async function criarUsuarioLegacy({ email }) {
   const agora = new Date();
 
@@ -390,6 +207,7 @@ async function criarOuVincularUsuarioAuth(authUser) {
   const emailLimpo = String(authUser.email).trim().toLowerCase();
 
   let usuario = await buscarUsuarioPorAuthUserId(authUser.id);
+
   if (usuario) {
     if (usuario.email !== emailLimpo) {
       usuario = await atualizarUsuarioPorAuthUserId(authUser.id, {
@@ -400,6 +218,7 @@ async function criarOuVincularUsuarioAuth(authUser) {
   }
 
   const usuarioPorEmail = await buscarUsuarioPorEmail(emailLimpo);
+
   if (usuarioPorEmail) {
     const atualizado = await supabase
       .from("users")
@@ -747,6 +566,7 @@ async function verificarAuth(req, res, next) {
     req.dbUser = mapearUsuarioDoBanco(dbUser);
     req.device = mapearDevice(validacaoDevice.dispositivo);
     req.deviceLimit = validacaoDevice.limite;
+
     next();
   } catch (error) {
     console.error("Erro em verificarAuth:", error);
@@ -792,6 +612,125 @@ async function chamarOpenAI(systemPrompt, userPrompt) {
   return texto;
 }
 
+function extrairEmailHotmart(body = {}) {
+  const email = String(
+    body?.data?.buyer?.email ||
+    body?.data?.purchase?.buyer?.email ||
+    body?.buyer?.email ||
+    body?.buyer_email ||
+    body?.email ||
+    ""
+  ).trim().toLowerCase();
+
+  return email || null;
+}
+
+function extrairEventoHotmart(body = {}) {
+  return String(
+    body?.event ||
+    body?.event_name ||
+    body?.type ||
+    body?.data?.event ||
+    ""
+  ).trim().toUpperCase();
+}
+
+function extrairProdutoHotmart(body = {}) {
+  return String(
+    body?.data?.product?.id ||
+    body?.data?.purchase?.product?.id ||
+    body?.product?.id ||
+    body?.product_id ||
+    ""
+  ).trim();
+}
+
+function eventoLiberaAcessoHotmart(evento) {
+  const e = String(evento || "").toUpperCase();
+
+  return [
+    "PURCHASE_APPROVED",
+    "PURCHASE_COMPLETE",
+    "PURCHASE_CANCELED_REVERSED",
+    "SUBSCRIPTION_PURCHASE_APPROVED",
+    "SUBSCRIPTION_REACTIVATED",
+    "SUBSCRIPTION_RENEWED",
+    "BILLET_PRINTED"
+  ].includes(e);
+}
+
+function eventoBloqueiaAcessoHotmart(evento) {
+  const e = String(evento || "").toUpperCase();
+
+  return [
+    "PURCHASE_REFUNDED",
+    "PURCHASE_CHARGEBACK",
+    "PURCHASE_CANCELED",
+    "SUBSCRIPTION_CANCELLATION",
+    "SUBSCRIPTION_CANCELED",
+    "SUBSCRIPTION_EXPIRED",
+    "SUBSCRIPTION_DELAYED"
+  ].includes(e);
+}
+
+async function ativarUsuarioPorEmailHotmart(email, plan) {
+  const emailLimpo = String(email || "").trim().toLowerCase();
+  if (!emailLimpo) {
+    throw new Error("Email do comprador não encontrado.");
+  }
+
+  const usuario = await buscarUsuarioPorEmail(emailLimpo);
+
+  if (usuario) {
+    return atualizarUsuarioPorAccessKey(usuario.access_key, {
+      email: emailLimpo,
+      status: "active",
+      plan: plan || "basic",
+      trial_ends_at: null
+    });
+  }
+
+  const agora = new Date().toISOString();
+
+  const payload = {
+    access_key: gerarAccessKey(),
+    auth_user_id: null,
+    email: emailLimpo,
+    status: "active",
+    plan: plan || "basic",
+    trial_ends_at: null,
+    stripe_customer_id: null,
+    stripe_subscription_id: null,
+    updated_at: agora
+  };
+
+  const { data, error } = await supabase
+    .from("users")
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Erro ao criar usuário Hotmart: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function bloquearUsuarioPorEmailHotmart(email) {
+  const emailLimpo = String(email || "").trim().toLowerCase();
+  if (!emailLimpo) return null;
+
+  const usuario = await buscarUsuarioPorEmail(emailLimpo);
+  if (!usuario) return null;
+
+  return atualizarUsuarioPorAccessKey(usuario.access_key, {
+    status: "blocked",
+    plan: null,
+    trial_ends_at: null
+  });
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -804,8 +743,8 @@ app.get("/debug/env", (req, res) => {
     supabaseUrl: SUPABASE_URL,
     supabaseUrlLength: SUPABASE_URL.length,
     supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
-    stripeConfigured: Boolean(STRIPE_SECRET_KEY),
-    webhookConfigured: Boolean(STRIPE_WEBHOOK_SECRET)
+    hotmartConfigured: Boolean(HOTMART_PRODUCT_ID),
+    openaiConfigured: Boolean(OPENAI_API_KEY)
   });
 });
 
@@ -832,6 +771,70 @@ app.get("/debug/supabase", async (req, res) => {
       ok: false,
       tipo: "catch",
       erro: error.message
+    });
+  }
+});
+
+app.post("/hotmart/webhook", async (req, res) => {
+  try {
+    const tokenOk = validarTokenHotmart(req);
+
+    if (!tokenOk) {
+      return res.status(401).json({
+        erro: "Token do webhook Hotmart inválido."
+      });
+    }
+
+    const evento = extrairEventoHotmart(req.body);
+    const email = extrairEmailHotmart(req.body);
+    const plan = getPlanoPorHotmart(req.body) || "basic";
+    const produtoId = extrairProdutoHotmart(req.body);
+
+    if (HOTMART_PRODUCT_ID && produtoId && String(produtoId) !== String(HOTMART_PRODUCT_ID)) {
+      return res.json({
+        ok: true,
+        ignorado: true,
+        motivo: "Produto diferente."
+      });
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        erro: "Email do comprador não encontrado no webhook."
+      });
+    }
+
+    if (eventoLiberaAcessoHotmart(evento)) {
+      const usuario = await ativarUsuarioPorEmailHotmart(email, plan);
+
+      return res.json({
+        ok: true,
+        acao: "ativado",
+        evento,
+        usuario: mapearUsuarioDoBanco(usuario)
+      });
+    }
+
+    if (eventoBloqueiaAcessoHotmart(evento)) {
+      const usuario = await bloquearUsuarioPorEmailHotmart(email);
+
+      return res.json({
+        ok: true,
+        acao: "bloqueado",
+        evento,
+        usuario: mapearUsuarioDoBanco(usuario)
+      });
+    }
+
+    return res.json({
+      ok: true,
+      ignorado: true,
+      evento
+    });
+  } catch (error) {
+    console.error("Erro em /hotmart/webhook:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro no webhook da Hotmart."
     });
   }
 });
@@ -990,8 +993,6 @@ app.get("/meu-status", async (req, res) => {
 
 app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
   try {
-    if (!garantirStripeConfig(res)) return;
-
     const { plan } = req.body || {};
 
     if (!plan || typeof plan !== "string") {
@@ -1000,151 +1001,22 @@ app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
       });
     }
 
-    const selectedPlan = getPlan(plan);
-    const dbUser = await buscarUsuarioPorAuthUserId(req.authUser.id);
-
-    if (!dbUser) {
-      return res.status(404).json({
-        erro: "Usuário não encontrado."
-      });
-    }
-
-    let customerId = dbUser.stripe_customer_id;
-
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: req.authUser.email,
-        metadata: {
-          authUserId: req.authUser.id
-        }
-      });
-
-      customerId = customer.id;
-
-      await atualizarUsuarioPorAuthUserId(req.authUser.id, {
-        stripe_customer_id: customerId
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      customer: customerId,
-      line_items: [
-        {
-          price: selectedPlan.priceId,
-          quantity: 1
-        }
-      ],
-      success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: CLIENT_CANCEL_URL,
-      subscription_data: {
-        metadata: {
-          authUserId: req.authUser.id,
-          plan: selectedPlan.key
-        }
-      },
-      metadata: {
-        authUserId: req.authUser.id,
-        plan: selectedPlan.key
-      }
-    });
+    const checkoutUrl = getHotmartCheckoutUrl(plan);
 
     return res.json({
-      checkoutUrl: session.url
+      checkoutUrl
     });
   } catch (error) {
     console.error("Erro em /create-checkout-session-auth:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao criar checkout session."
+      erro: error.message || "Erro ao abrir checkout Hotmart."
     });
   }
 });
 
 app.post("/create-checkout-session", async (req, res) => {
   try {
-    if (!garantirStripeConfig(res)) return;
-
-    const authHeader = req.headers.authorization || "";
-
-    if (authHeader.startsWith("Bearer ")) {
-      return verificarAuth(req, res, async () => {
-        try {
-          const { plan } = req.body || {};
-
-          if (!plan || typeof plan !== "string") {
-            return res.status(400).json({
-              erro: "Plano obrigatório."
-            });
-          }
-
-          const selectedPlan = getPlan(plan);
-          const dbUser = await buscarUsuarioPorAuthUserId(req.authUser.id);
-
-          if (!dbUser) {
-            return res.status(404).json({
-              erro: "Usuário não encontrado."
-            });
-          }
-
-          let customerId = dbUser.stripe_customer_id;
-
-          if (!customerId) {
-            const customer = await stripe.customers.create({
-              email: req.authUser.email,
-              metadata: {
-                authUserId: req.authUser.id
-              }
-            });
-
-            customerId = customer.id;
-
-            await atualizarUsuarioPorAuthUserId(req.authUser.id, {
-              stripe_customer_id: customerId
-            });
-          }
-
-          const session = await stripe.checkout.sessions.create({
-            mode: "subscription",
-            customer: customerId,
-            line_items: [
-              {
-                price: selectedPlan.priceId,
-                quantity: 1
-              }
-            ],
-            success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: CLIENT_CANCEL_URL,
-            subscription_data: {
-              metadata: {
-                authUserId: req.authUser.id,
-                plan: selectedPlan.key
-              }
-            },
-            metadata: {
-              authUserId: req.authUser.id,
-              plan: selectedPlan.key
-            }
-          });
-
-          return res.json({
-            checkoutUrl: session.url
-          });
-        } catch (error) {
-          console.error("Erro em /create-checkout-session (auth):", error);
-          return res.status(500).json({
-            erro: error.message || "Erro ao criar checkout session."
-          });
-        }
-      });
-    }
-
-    const { accessKey, plan } = req.body || {};
-
-    if (!accessKey || typeof accessKey !== "string") {
-      return res.status(400).json({
-        erro: "accessKey obrigatória."
-      });
-    }
+    const { plan } = req.body || {};
 
     if (!plan || typeof plan !== "string") {
       return res.status(400).json({
@@ -1152,62 +1024,15 @@ app.post("/create-checkout-session", async (req, res) => {
       });
     }
 
-    const selectedPlan = getPlan(plan);
-    const user = await buscarUsuarioPorAccessKey(accessKey);
-
-    if (!user) {
-      return res.status(404).json({
-        erro: "Usuário não encontrado."
-      });
-    }
-
-    let customerId = user.stripe_customer_id;
-
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-        metadata: {
-          accessKey
-        }
-      });
-
-      customerId = customer.id;
-
-      await atualizarUsuarioPorAccessKey(accessKey, {
-        stripe_customer_id: customerId
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      customer: customerId,
-      line_items: [
-        {
-          price: selectedPlan.priceId,
-          quantity: 1
-        }
-      ],
-      success_url: `${CLIENT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: CLIENT_CANCEL_URL,
-      subscription_data: {
-        metadata: {
-          accessKey,
-          plan: selectedPlan.key
-        }
-      },
-      metadata: {
-        accessKey,
-        plan: selectedPlan.key
-      }
-    });
+    const checkoutUrl = getHotmartCheckoutUrl(plan);
 
     return res.json({
-      checkoutUrl: session.url
+      checkoutUrl
     });
   } catch (error) {
     console.error("Erro em /create-checkout-session:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao criar checkout session."
+      erro: error.message || "Erro ao abrir checkout Hotmart."
     });
   }
 });
@@ -1237,7 +1062,6 @@ Entregue só a tradução final.
 `.trim();
 
       const resultado = await chamarOpenAI(systemPrompt, texto.trim());
-
       return res.json({ resultado });
     } catch (error) {
       console.error("Erro em /traduzir:", error);
@@ -1272,7 +1096,6 @@ app.post("/converter", async (req, res) => {
       const systemPrompt = `
 Você é um assistente que transforma respostas escritas em português
 em inglês natural, curto, claro e profissional para conversa no WhatsApp.
-
 Regras:
 - Entregue apenas a versão final em inglês.
 - Não explique.
@@ -1290,7 +1113,6 @@ ${texto.trim()}
 `.trim();
 
       const resultado = await chamarOpenAI(systemPrompt, userPrompt);
-
       return res.json({ resultado });
     } catch (error) {
       console.error("Erro em /converter:", error);
