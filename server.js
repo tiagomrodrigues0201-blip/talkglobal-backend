@@ -111,8 +111,23 @@ function extrairEmailHotmart(body = {}) {
   return String(
     body?.data?.buyer?.email ||
     body?.data?.purchase?.buyer?.email ||
+    body?.data?.user?.email ||
+    body?.data?.subscriber?.email ||
+    body?.data?.subscription?.subscriber?.email ||
+    body?.data?.user?.contact?.email ||
+    body?.data?.user?.checkout_email ||
+    body?.data?.user?.email_address ||
+    body?.data?.user?.mail ||
+    body?.data?.user?.primary_email ||
+    body?.data?.user?.email_contact ||
+    body?.data?.contact?.email ||
+    body?.data?.subscriber?.contact?.email ||
+    body?.data?.user?.buyer?.email ||
+    body?.data?.client?.email ||
     body?.buyer?.email ||
     body?.buyer_email ||
+    body?.user?.email ||
+    body?.subscriber?.email ||
     body?.email ||
     ""
   ).trim().toLowerCase();
@@ -129,13 +144,16 @@ function extrairEventoHotmart(body = {}) {
 }
 
 function extrairProdutoHotmart(body = {}) {
-  return String(
-    body?.data?.product?.id ||
-    body?.data?.purchase?.product?.id ||
-    body?.product?.id ||
-    body?.product_id ||
+  const valor = (
+    body?.data?.product?.id ??
+    body?.data?.purchase?.product?.id ??
+    body?.data?.subscription?.product?.id ??
+    body?.product?.id ??
+    body?.product_id ??
     ""
-  ).trim();
+  );
+
+  return String(valor).trim();
 }
 
 function eventoLiberaAcesso(evento) {
@@ -159,6 +177,25 @@ function eventoBloqueiaAcesso(evento) {
     "SUBSCRIPTION_CANCELED",
     "SUBSCRIPTION_EXPIRED",
     "SUBSCRIPTION_DELAYED"
+  ].includes(evento);
+}
+
+function eventoIgnoravel(evento) {
+  return [
+    "CLUB_FIRST_ACCESS",
+    "SWITCH_PLAN",
+    "UPDATE_SUBSCRIPTION_CHARGE_DATE",
+    "MODULE_COMPLETED",
+    "BOLETO_PRINTED",
+    "PURCHASE_DELAYED",
+    "PURCHASE_EXPIRED",
+    "PURCHASE_PROTEST",
+    "PURCHASE_BILLET_PRINTED",
+    "PURCHASE_OUT_OF_SHOPPING_CART",
+    "ABANDONED_CART",
+    "CART_ABANDONMENT",
+    "ORDER_BUMP_ACCEPTED",
+    "ORDER_BUMP_REJECTED"
   ].includes(evento);
 }
 
@@ -237,24 +274,57 @@ app.post("/hotmart/webhook", async (req, res) => {
       produtoId &&
       String(produtoId) !== String(HOTMART_PRODUCT_ID)
     ) {
-      return res.json({ ok: true, ignorado: true, motivo: "produto_diferente" });
+      return res.json({
+        ok: true,
+        ignorado: true,
+        motivo: "produto_diferente"
+      });
+    }
+
+    if (eventoIgnoravel(evento)) {
+      return res.json({
+        ok: true,
+        ignorado: true,
+        motivo: "evento_ignorado",
+        evento
+      });
     }
 
     if (!email) {
-      return res.status(400).json({ erro: "Sem email" });
+      return res.json({
+        ok: true,
+        ignorado: true,
+        motivo: "sem_email",
+        evento
+      });
     }
 
     if (eventoLiberaAcesso(evento)) {
       const user = await ativarUsuario(email, plan);
-      return res.json({ ok: true, acao: "ativado", user });
+      return res.json({
+        ok: true,
+        acao: "ativado",
+        evento,
+        user
+      });
     }
 
     if (eventoBloqueiaAcesso(evento)) {
       const user = await bloquearUsuario(email);
-      return res.json({ ok: true, acao: "bloqueado", user });
+      return res.json({
+        ok: true,
+        acao: "bloqueado",
+        evento,
+        user
+      });
     }
 
-    return res.json({ ok: true, ignorado: true, evento });
+    return res.json({
+      ok: true,
+      ignorado: true,
+      motivo: "evento_nao_mapeado",
+      evento
+    });
   } catch (err) {
     console.error("Erro no webhook Hotmart:", err);
     return res.status(500).json({ erro: "erro webhook" });
