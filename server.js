@@ -23,7 +23,8 @@ const {
 
 const app = express();
 
-const FREE_USAGE_LIMIT = 20;
+const FREE_TRANSLATE_LIMIT = 20;
+const FREE_CONVERT_LIMIT = 20;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -69,8 +70,16 @@ function mapearUsuarioDoBanco(user) {
     email: user.email,
     status: user.status,
     plan: user.plan || null,
-    usageCount: Number(user.usage_count || 0),
-    usageLimit: user.usage_limit === null ? null : Number(user.usage_limit || 0),
+    translateUsageCount: Number(user.translate_usage_count || 0),
+    translateUsageLimit:
+      user.translate_usage_limit === null
+        ? null
+        : Number(user.translate_usage_limit || 0),
+    convertUsageCount: Number(user.convert_usage_count || 0),
+    convertUsageLimit:
+      user.convert_usage_limit === null
+        ? null
+        : Number(user.convert_usage_limit || 0),
     stripeCustomerId: user.stripe_customer_id || null,
     stripeSubscriptionId: user.stripe_subscription_id || null,
     createdAt: user.created_at,
@@ -197,8 +206,10 @@ async function criarUsuarioFree({ email, authUserId = null }) {
     email: email || null,
     status: "free",
     plan: "free",
-    usage_count: 0,
-    usage_limit: FREE_USAGE_LIMIT,
+    translate_usage_count: 0,
+    translate_usage_limit: FREE_TRANSLATE_LIMIT,
+    convert_usage_count: 0,
+    convert_usage_limit: FREE_CONVERT_LIMIT,
     trial_ends_at: null,
     stripe_customer_id: null,
     stripe_subscription_id: null,
@@ -229,19 +240,38 @@ async function criarOuVincularUsuarioAuth(authUser) {
   let usuario = await buscarUsuarioPorAuthUserId(authUser.id);
 
   if (usuario) {
+    const campos = {};
+
     if (usuario.email !== emailLimpo) {
-      usuario = await atualizarUsuarioPorAuthUserId(authUser.id, {
-        email: emailLimpo
-      });
+      campos.email = emailLimpo;
     }
 
     if (!usuario.status) {
-      usuario = await atualizarUsuarioPorAuthUserId(authUser.id, {
-        status: "free",
-        plan: "free",
-        usage_limit: FREE_USAGE_LIMIT,
-        usage_count: Number(usuario.usage_count || 0)
-      });
+      campos.status = "free";
+    }
+
+    if (!usuario.plan) {
+      campos.plan = "free";
+    }
+
+    if (usuario.translate_usage_limit === null && usuario.plan !== "basic" && usuario.plan !== "pro") {
+      campos.translate_usage_limit = FREE_TRANSLATE_LIMIT;
+    }
+
+    if (usuario.convert_usage_limit === null && usuario.plan !== "basic" && usuario.plan !== "pro") {
+      campos.convert_usage_limit = FREE_CONVERT_LIMIT;
+    }
+
+    if (usuario.translate_usage_count === null || usuario.translate_usage_count === undefined) {
+      campos.translate_usage_count = 0;
+    }
+
+    if (usuario.convert_usage_count === null || usuario.convert_usage_count === undefined) {
+      campos.convert_usage_count = 0;
+    }
+
+    if (Object.keys(campos).length > 0) {
+      usuario = await atualizarUsuarioPorAuthUserId(authUser.id, campos);
     }
 
     return usuario;
@@ -263,8 +293,20 @@ async function criarOuVincularUsuarioAuth(authUser) {
       campos.plan = "free";
     }
 
-    if (usuarioPorEmail.usage_limit === null && usuarioPorEmail.plan !== "basic" && usuarioPorEmail.plan !== "pro") {
-      campos.usage_limit = FREE_USAGE_LIMIT;
+    if (usuarioPorEmail.translate_usage_limit === null && usuarioPorEmail.plan !== "basic" && usuarioPorEmail.plan !== "pro") {
+      campos.translate_usage_limit = FREE_TRANSLATE_LIMIT;
+    }
+
+    if (usuarioPorEmail.convert_usage_limit === null && usuarioPorEmail.plan !== "basic" && usuarioPorEmail.plan !== "pro") {
+      campos.convert_usage_limit = FREE_CONVERT_LIMIT;
+    }
+
+    if (usuarioPorEmail.translate_usage_count === null || usuarioPorEmail.translate_usage_count === undefined) {
+      campos.translate_usage_count = 0;
+    }
+
+    if (usuarioPorEmail.convert_usage_count === null || usuarioPorEmail.convert_usage_count === undefined) {
+      campos.convert_usage_count = 0;
     }
 
     const atualizado = await supabase
@@ -318,7 +360,7 @@ function validarStatusDoUsuario(user) {
   return { ok: true };
 }
 
-function validarLimiteDeUso(user) {
+function validarLimiteDeUso(user, tipo) {
   if (!user) {
     return {
       ok: false,
@@ -333,28 +375,60 @@ function validarLimiteDeUso(user) {
     return { ok: true };
   }
 
-  const usageCount = Number(user.usage_count || 0);
-  const usageLimit = user.usage_limit === null ? FREE_USAGE_LIMIT : Number(user.usage_limit || 0);
+  if (tipo === "traduzir") {
+    const usageCount = Number(user.translate_usage_count || 0);
+    const usageLimit =
+      user.translate_usage_limit === null
+        ? FREE_TRANSLATE_LIMIT
+        : Number(user.translate_usage_limit || 0);
 
-  if (usageCount >= usageLimit) {
+    if (usageCount >= usageLimit) {
+      return {
+        ok: false,
+        statusCode: 403,
+        erro: "Você atingiu o limite gratuito de 20 traduções. Assine um plano para continuar.",
+        upgradeRequired: true,
+        usageCount,
+        usageLimit
+      };
+    }
+
     return {
-      ok: false,
-      statusCode: 403,
-      erro: "Você atingiu o limite gratuito de 20 traduções. Assine um plano para continuar.",
-      upgradeRequired: true,
+      ok: true,
       usageCount,
       usageLimit
     };
   }
 
-  return {
-    ok: true,
-    usageCount,
-    usageLimit
-  };
+  if (tipo === "converter") {
+    const usageCount = Number(user.convert_usage_count || 0);
+    const usageLimit =
+      user.convert_usage_limit === null
+        ? FREE_CONVERT_LIMIT
+        : Number(user.convert_usage_limit || 0);
+
+    if (usageCount >= usageLimit) {
+      return {
+        ok: false,
+        statusCode: 403,
+        erro: "Você atingiu o limite gratuito de 20 conversões. Assine um plano para continuar.",
+        upgradeRequired: true,
+        usageCount,
+        usageLimit
+      };
+    }
+
+    return {
+      ok: true,
+      usageCount,
+      usageLimit
+    };
+  }
+
+  return { ok: true };
 }
 
-async function consumirUsoSeNecessario(user) {
+async function consumirUsoSeNecessario(user, tipo) {
   if (!user) return user;
 
   const plano = String(user.plan || "").toLowerCase();
@@ -363,11 +437,19 @@ async function consumirUsoSeNecessario(user) {
     return user;
   }
 
-  const novoCount = Number(user.usage_count || 0) + 1;
+  if (tipo === "traduzir") {
+    return atualizarUsuarioPorId(user.id, {
+      translate_usage_count: Number(user.translate_usage_count || 0) + 1
+    });
+  }
 
-  return atualizarUsuarioPorId(user.id, {
-    usage_count: novoCount
-  });
+  if (tipo === "converter") {
+    return atualizarUsuarioPorId(user.id, {
+      convert_usage_count: Number(user.convert_usage_count || 0) + 1
+    });
+  }
+
+  return user;
 }
 
 async function verificarAcessoLegacy(req, res, next) {
@@ -571,7 +653,7 @@ async function verificarAuth(req, res, next) {
       });
     }
 
-    let dbUser = await criarOuVincularUsuarioAuth(user);
+    const dbUser = await criarOuVincularUsuarioAuth(user);
     const validacao = validarStatusDoUsuario(dbUser);
 
     if (!validacao.ok) {
@@ -736,23 +818,20 @@ async function ativarUsuario(email, plan) {
   let user = await buscarUsuarioPorEmail(email);
 
   if (user) {
-    if (user.auth_user_id) {
-      return atualizarUsuarioPorAuthUserId(user.auth_user_id, {
-        email,
-        status: "active",
-        plan: plan || "basic",
-        usage_limit: null,
-        trial_ends_at: null
-      });
-    }
-
-    return atualizarUsuarioPorAccessKey(user.access_key, {
+    const campos = {
       email,
       status: "active",
       plan: plan || "basic",
-      usage_limit: null,
+      translate_usage_limit: null,
+      convert_usage_limit: null,
       trial_ends_at: null
-    });
+    };
+
+    if (user.auth_user_id) {
+      return atualizarUsuarioPorAuthUserId(user.auth_user_id, campos);
+    }
+
+    return atualizarUsuarioPorAccessKey(user.access_key, campos);
   }
 
   const agora = new Date().toISOString();
@@ -763,8 +842,10 @@ async function ativarUsuario(email, plan) {
     email,
     status: "active",
     plan: plan || "basic",
-    usage_count: 0,
-    usage_limit: null,
+    translate_usage_count: 0,
+    translate_usage_limit: null,
+    convert_usage_count: 0,
+    convert_usage_limit: null,
     trial_ends_at: null,
     stripe_customer_id: null,
     stripe_subscription_id: null,
@@ -795,7 +876,8 @@ async function voltarUsuarioParaFree(email) {
   const campos = {
     status: "free",
     plan: "free",
-    usage_limit: FREE_USAGE_LIMIT,
+    translate_usage_limit: FREE_TRANSLATE_LIMIT,
+    convert_usage_limit: FREE_CONVERT_LIMIT,
     trial_ends_at: null
   };
 
@@ -821,7 +903,8 @@ app.get("/debug/env", (req, res) => {
     hotmartToken: Boolean(process.env.HOTMART_WEBHOOK_TOKEN),
     hotmartBasicUrl: Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL),
     hotmartProUrl: Boolean(process.env.HOTMART_PRO_CHECKOUT_URL),
-    freeUsageLimit: FREE_USAGE_LIMIT,
+    freeTranslateLimit: FREE_TRANSLATE_LIMIT,
+    freeConvertLimit: FREE_CONVERT_LIMIT,
     openai: Boolean(OPENAI_API_KEY)
   });
 });
@@ -948,19 +1031,39 @@ app.post("/criar-usuario", async (req, res) => {
 
     if (!usuario) {
       usuario = await criarUsuarioFree({ email: emailLimpo });
-    } else if (!usuario.status || !usuario.plan) {
-      if (usuario.auth_user_id) {
-        usuario = await atualizarUsuarioPorAuthUserId(usuario.auth_user_id, {
-          status: "free",
-          plan: "free",
-          usage_limit: user.usage_limit ?? FREE_USAGE_LIMIT
-        });
-      } else {
-        usuario = await atualizarUsuarioPorAccessKey(usuario.access_key, {
-          status: "free",
-          plan: "free",
-          usage_limit: usuario.usage_limit ?? FREE_USAGE_LIMIT
-        });
+    } else {
+      const campos = {};
+
+      if (!usuario.status) {
+        campos.status = "free";
+      }
+
+      if (!usuario.plan) {
+        campos.plan = "free";
+      }
+
+      if (usuario.translate_usage_limit === null && usuario.plan !== "basic" && usuario.plan !== "pro") {
+        campos.translate_usage_limit = FREE_TRANSLATE_LIMIT;
+      }
+
+      if (usuario.convert_usage_limit === null && usuario.plan !== "basic" && usuario.plan !== "pro") {
+        campos.convert_usage_limit = FREE_CONVERT_LIMIT;
+      }
+
+      if (usuario.translate_usage_count === null || usuario.translate_usage_count === undefined) {
+        campos.translate_usage_count = 0;
+      }
+
+      if (usuario.convert_usage_count === null || usuario.convert_usage_count === undefined) {
+        campos.convert_usage_count = 0;
+      }
+
+      if (Object.keys(campos).length > 0) {
+        if (usuario.auth_user_id) {
+          usuario = await atualizarUsuarioPorAuthUserId(usuario.auth_user_id, campos);
+        } else {
+          usuario = await atualizarUsuarioPorAccessKey(usuario.access_key, campos);
+        }
       }
     }
 
@@ -1142,14 +1245,22 @@ app.post("/traduzir", async (req, res) => {
         ? await buscarUsuarioPorAuthUserId(usuarioAtual.authUserId)
         : await buscarUsuarioPorAccessKey(usuarioAtual?.key || "");
 
-      const validacaoUso = validarLimiteDeUso(usuarioBanco);
+      const validacaoUso = validarLimiteDeUso(usuarioBanco, "traduzir");
 
       if (!validacaoUso.ok) {
         return res.status(validacaoUso.statusCode).json({
           erro: validacaoUso.erro,
           upgradeRequired: true,
-          usageCount: validacaoUso.usageCount,
-          usageLimit: validacaoUso.usageLimit
+          translateUsageCount: Number(usuarioBanco?.translate_usage_count || 0),
+          translateUsageLimit:
+            usuarioBanco?.translate_usage_limit === null
+              ? null
+              : Number(usuarioBanco?.translate_usage_limit || 0),
+          convertUsageCount: Number(usuarioBanco?.convert_usage_count || 0),
+          convertUsageLimit:
+            usuarioBanco?.convert_usage_limit === null
+              ? null
+              : Number(usuarioBanco?.convert_usage_limit || 0)
         });
       }
 
@@ -1171,7 +1282,7 @@ Entregue só a tradução final.
 `.trim();
 
       const resultado = await chamarOpenAI(systemPrompt, texto.trim());
-      const usuarioAtualizado = await consumirUsoSeNecessario(usuarioBanco);
+      const usuarioAtualizado = await consumirUsoSeNecessario(usuarioBanco, "traduzir");
 
       return res.json({
         resultado,
@@ -1204,14 +1315,22 @@ app.post("/converter", async (req, res) => {
         ? await buscarUsuarioPorAuthUserId(usuarioAtual.authUserId)
         : await buscarUsuarioPorAccessKey(usuarioAtual?.key || "");
 
-      const validacaoUso = validarLimiteDeUso(usuarioBanco);
+      const validacaoUso = validarLimiteDeUso(usuarioBanco, "converter");
 
       if (!validacaoUso.ok) {
         return res.status(validacaoUso.statusCode).json({
           erro: validacaoUso.erro,
           upgradeRequired: true,
-          usageCount: validacaoUso.usageCount,
-          usageLimit: validacaoUso.usageLimit
+          translateUsageCount: Number(usuarioBanco?.translate_usage_count || 0),
+          translateUsageLimit:
+            usuarioBanco?.translate_usage_limit === null
+              ? null
+              : Number(usuarioBanco?.translate_usage_limit || 0),
+          convertUsageCount: Number(usuarioBanco?.convert_usage_count || 0),
+          convertUsageLimit:
+            usuarioBanco?.convert_usage_limit === null
+              ? null
+              : Number(usuarioBanco?.convert_usage_limit || 0)
         });
       }
 
@@ -1243,7 +1362,7 @@ ${texto.trim()}
 `.trim();
 
       const resultado = await chamarOpenAI(systemPrompt, userPrompt);
-      const usuarioAtualizado = await consumirUsoSeNecessario(usuarioBanco);
+      const usuarioAtualizado = await consumirUsoSeNecessario(usuarioBanco, "converter");
 
       return res.json({
         resultado,
