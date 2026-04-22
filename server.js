@@ -205,7 +205,6 @@ async function criarOuVincularUsuarioAuth(authUser) {
   }
 
   const emailLimpo = String(authUser.email).trim().toLowerCase();
-
   let usuario = await buscarUsuarioPorAuthUserId(authUser.id);
 
   if (usuario) {
@@ -675,6 +674,7 @@ function eventoBloqueiaAcessoHotmart(evento) {
 
 async function ativarUsuarioPorEmailHotmart(email, plan) {
   const emailLimpo = String(email || "").trim().toLowerCase();
+
   if (!emailLimpo) {
     throw new Error("Email do comprador não encontrado.");
   }
@@ -743,7 +743,12 @@ app.get("/debug/env", (req, res) => {
     supabaseUrl: SUPABASE_URL,
     supabaseUrlLength: SUPABASE_URL.length,
     supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
-    hotmartConfigured: Boolean(HOTMART_PRODUCT_ID),
+    hotmartBasicConfigured: Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL),
+    hotmartProConfigured: Boolean(process.env.HOTMART_PRO_CHECKOUT_URL),
+    hotmartConfigured:
+      Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL) &&
+      Boolean(process.env.HOTMART_PRO_CHECKOUT_URL),
+    hotmartProductConfigured: Boolean(process.env.HOTMART_PRODUCT_ID),
     openaiConfigured: Boolean(OPENAI_API_KEY)
   });
 });
@@ -790,7 +795,11 @@ app.post("/hotmart/webhook", async (req, res) => {
     const plan = getPlanoPorHotmart(req.body) || "basic";
     const produtoId = extrairProdutoHotmart(req.body);
 
-    if (HOTMART_PRODUCT_ID && produtoId && String(produtoId) !== String(HOTMART_PRODUCT_ID)) {
+    if (
+      HOTMART_PRODUCT_ID &&
+      produtoId &&
+      String(produtoId) !== String(HOTMART_PRODUCT_ID)
+    ) {
       return res.json({
         ok: true,
         ignorado: true,
