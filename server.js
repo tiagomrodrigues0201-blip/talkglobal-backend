@@ -2,20 +2,12 @@ const fetch = require("node-fetch");
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
-
 const { supabase } = require("./lib/supabase");
-
 const {
   PORT,
   OPENAI_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  DEVICE_ID_HEADER,
-  DEVICE_NAME_HEADER,
-  DEVICE_ACTIVE_DAYS,
-  TRIAL_DAYS
+  SUPABASE_URL
 } = require("./lib/env");
-
 const {
   HOTMART_PRODUCT_ID,
   getHotmartCheckoutUrl,
@@ -36,12 +28,6 @@ function gerarAccessKey() {
   return `tg_${crypto.randomBytes(16).toString("hex")}`;
 }
 
-function adicionarDias(data, dias) {
-  const novaData = new Date(data);
-  novaData.setDate(novaData.getDate() + dias);
-  return novaData;
-}
-
 function garantirOpenAIKey(res) {
   if (!OPENAI_API_KEY) {
     res.status(500).json({
@@ -57,17 +43,21 @@ function garantirOpenAIKey(res) {
 // =============================
 
 async function buscarUsuarioPorEmail(email) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("users")
     .select("*")
     .eq("email", email)
     .maybeSingle();
 
+  if (error) {
+    throw new Error(`Erro ao buscar usuário por email: ${error.message}`);
+  }
+
   return data;
 }
 
 async function atualizarUsuarioPorAccessKey(accessKey, campos) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("users")
     .update({
       ...campos,
@@ -76,6 +66,39 @@ async function atualizarUsuarioPorAccessKey(accessKey, campos) {
     .eq("access_key", accessKey)
     .select()
     .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao atualizar usuário por access_key: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function criarUsuarioHotmart(email, plan) {
+  const agora = new Date().toISOString();
+
+  const payload = {
+    access_key: gerarAccessKey(),
+    auth_user_id: null,
+    email,
+    status: "active",
+    plan,
+    trial_ends_at: null,
+    stripe_customer_id: null,
+    stripe_subscription_id: null,
+    created_at: agora,
+    updated_at: agora
+  };
+
+  const { data, error } = await supabase
+    .from("users")
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Erro ao criar usuário Hotmart: ${error.message}`);
+  }
 
   return data;
 }
@@ -87,7 +110,9 @@ async function atualizarUsuarioPorAccessKey(accessKey, campos) {
 function extrairEmailHotmart(body = {}) {
   return String(
     body?.data?.buyer?.email ||
+    body?.data?.purchase?.buyer?.email ||
     body?.buyer?.email ||
+    body?.buyer_email ||
     body?.email ||
     ""
   ).trim().toLowerCase();
@@ -98,13 +123,16 @@ function extrairEventoHotmart(body = {}) {
     body?.event ||
     body?.event_name ||
     body?.type ||
+    body?.data?.event ||
     ""
-  ).toUpperCase();
+  ).trim().toUpperCase();
 }
 
 function extrairProdutoHotmart(body = {}) {
   return String(
     body?.data?.product?.id ||
+    body?.data?.purchase?.product?.id ||
+    body?.product?.id ||
     body?.product_id ||
     ""
   ).trim();
@@ -114,7 +142,11 @@ function eventoLiberaAcesso(evento) {
   return [
     "PURCHASE_APPROVED",
     "PURCHASE_COMPLETE",
-    "SUBSCRIPTION_RENEWED"
+    "PURCHASE_CANCELED_REVERSED",
+    "SUBSCRIPTION_PURCHASE_APPROVED",
+    "SUBSCRIPTION_REACTIVATED",
+    "SUBSCRIPTION_RENEWED",
+    "BILLET_PRINTED"
   ].includes(evento);
 }
 
@@ -122,7 +154,11 @@ function eventoBloqueiaAcesso(evento) {
   return [
     "PURCHASE_REFUNDED",
     "PURCHASE_CHARGEBACK",
-    "SUBSCRIPTION_CANCELED"
+    "PURCHASE_CANCELED",
+    "SUBSCRIPTION_CANCELLATION",
+    "SUBSCRIPTION_CANCELED",
+    "SUBSCRIPTION_EXPIRED",
+    "SUBSCRIPTION_DELAYED"
   ].includes(evento);
 }
 
@@ -131,38 +167,27 @@ async function ativarUsuario(email, plan) {
 
   if (user) {
     return atualizarUsuarioPorAccessKey(user.access_key, {
+      email,
       status: "active",
-      plan,
+      plan: plan || "basic",
       trial_ends_at: null
     });
   }
 
-  const novo = {
-    access_key: gerarAccessKey(),
-    email,
-    status: "active",
-    plan,
-    trial_ends_at: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
-  };
-
-  const { data } = await supabase
-    .from("users")
-    .insert(novo)
-    .select()
-    .single();
-
-  return data;
+  return criarUsuarioHotmart(email, plan || "basic");
 }
 
 async function bloquearUsuario(email) {
   const user = await buscarUsuarioPorEmail(email);
-  if (!user) return null;
+
+  if (!user) {
+    return null;
+  }
 
   return atualizarUsuarioPorAccessKey(user.access_key, {
     status: "blocked",
-    plan: null
+    plan: null,
+    trial_ends_at: null
   });
 }
 
@@ -179,6 +204,8 @@ app.get("/debug/env", (req, res) => {
     supabase: Boolean(SUPABASE_URL),
     hotmartProduct: Boolean(process.env.HOTMART_PRODUCT_ID),
     hotmartToken: Boolean(process.env.HOTMART_WEBHOOK_TOKEN),
+    hotmartBasicUrl: Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL),
+    hotmartProUrl: Boolean(process.env.HOTMART_PRO_CHECKOUT_URL),
     openai: Boolean(OPENAI_API_KEY)
   });
 });
@@ -189,7 +216,6 @@ app.get("/debug/env", (req, res) => {
 
 app.post("/hotmart/webhook", async (req, res) => {
   try {
-    // 🔐 valida token
     if (!validarTokenHotmart(req)) {
       return res.status(401).json({ erro: "Token inválido" });
     }
@@ -199,31 +225,39 @@ app.post("/hotmart/webhook", async (req, res) => {
     const produtoId = extrairProdutoHotmart(req.body);
     const plan = getPlanoPorHotmart(req.body) || "basic";
 
-    if (HOTMART_PRODUCT_ID && produtoId !== HOTMART_PRODUCT_ID) {
-      return res.json({ ignorado: true });
+    console.log("Webhook Hotmart recebido:", {
+      evento,
+      email,
+      produtoId,
+      plan
+    });
+
+    if (
+      HOTMART_PRODUCT_ID &&
+      produtoId &&
+      String(produtoId) !== String(HOTMART_PRODUCT_ID)
+    ) {
+      return res.json({ ok: true, ignorado: true, motivo: "produto_diferente" });
     }
 
     if (!email) {
       return res.status(400).json({ erro: "Sem email" });
     }
 
-    // ✅ ATIVA
     if (eventoLiberaAcesso(evento)) {
       const user = await ativarUsuario(email, plan);
       return res.json({ ok: true, acao: "ativado", user });
     }
 
-    // ❌ BLOQUEIA
     if (eventoBloqueiaAcesso(evento)) {
       const user = await bloquearUsuario(email);
       return res.json({ ok: true, acao: "bloqueado", user });
     }
 
-    return res.json({ ok: true, ignorado: true });
-
+    return res.json({ ok: true, ignorado: true, evento });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ erro: "erro webhook" });
+    console.error("Erro no webhook Hotmart:", err);
+    return res.status(500).json({ erro: "erro webhook" });
   }
 });
 
@@ -232,15 +266,21 @@ app.post("/hotmart/webhook", async (req, res) => {
 // =============================
 
 app.post("/create-checkout-session", (req, res) => {
-  const { plan } = req.body;
+  try {
+    const { plan } = req.body || {};
 
-  if (!plan) {
-    return res.status(400).json({ erro: "plan obrigatório" });
+    if (!plan) {
+      return res.status(400).json({ erro: "plan obrigatório" });
+    }
+
+    const url = getHotmartCheckoutUrl(plan);
+
+    return res.json({ checkoutUrl: url });
+  } catch (error) {
+    return res.status(500).json({
+      erro: error.message || "Erro ao gerar checkout"
+    });
   }
-
-  const url = getHotmartCheckoutUrl(plan);
-
-  res.json({ checkoutUrl: url });
 });
 
 // =============================
@@ -248,27 +288,54 @@ app.post("/create-checkout-session", (req, res) => {
 // =============================
 
 app.post("/traduzir", async (req, res) => {
-  if (!garantirOpenAIKey(res)) return;
+  try {
+    if (!garantirOpenAIKey(res)) return;
 
-  const { texto } = req.body;
+    const { texto } = req.body || {};
 
-  const resposta = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: texto }]
-    })
-  });
+    if (!texto || typeof texto !== "string" || !texto.trim()) {
+      return res.status(400).json({
+        erro: "Texto inválido para tradução."
+      });
+    }
 
-  const data = await resposta.json();
+    const resposta = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "Traduza para português do Brasil de forma natural. Responda apenas com a tradução final."
+          },
+          {
+            role: "user",
+            content: texto
+          }
+        ]
+      })
+    });
 
-  res.json({
-    resultado: data.choices?.[0]?.message?.content
-  });
+    const data = await resposta.json();
+
+    if (!resposta.ok) {
+      return res.status(500).json({
+        erro: data?.error?.message || "Erro ao comunicar com OpenAI"
+      });
+    }
+
+    return res.json({
+      resultado: data?.choices?.[0]?.message?.content || ""
+    });
+  } catch (error) {
+    return res.status(500).json({
+      erro: error.message || "Erro ao traduzir"
+    });
+  }
 });
 
 // =============================
