@@ -672,6 +672,8 @@ async function validarLimiteDispositivos(user, deviceId, deviceName) {
 }
 
 async function verificarAuth(req, res, next) {
+  let etapa = "inicio";
+
   try {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ")
@@ -684,6 +686,7 @@ async function verificarAuth(req, res, next) {
       });
     }
 
+    etapa = "supabase_get_user";
     const {
       data: { user },
       error
@@ -695,7 +698,10 @@ async function verificarAuth(req, res, next) {
       });
     }
 
+    etapa = "criar_ou_vincular_usuario";
     const dbUser = await criarOuVincularUsuarioAuth(user);
+
+    etapa = "validar_status";
     const validacao = validarStatusDoUsuario(dbUser);
 
     if (!validacao.ok) {
@@ -704,8 +710,9 @@ async function verificarAuth(req, res, next) {
       });
     }
 
-    const deviceId = (req.headers[DEVICE_ID_HEADER] || "").trim();
-    const deviceName = (req.headers[DEVICE_NAME_HEADER] || "").trim();
+    etapa = "validar_dispositivo";
+    const deviceId = String(req.headers[DEVICE_ID_HEADER] || "").trim();
+    const deviceName = String(req.headers[DEVICE_NAME_HEADER] || "").trim();
 
     const validacaoDevice = await validarLimiteDispositivos(
       dbUser,
@@ -726,9 +733,13 @@ async function verificarAuth(req, res, next) {
 
     next();
   } catch (error) {
-    console.error("Erro em verificarAuth:", error);
+    console.error("Erro em verificarAuth:", {
+      etapa,
+      message: error.message,
+      stack: error.stack
+    });
     return res.status(500).json({
-      erro: "Erro interno ao validar autenticação."
+      erro: `Erro interno ao validar autenticação (${etapa}): ${error.message || "erro desconhecido"}`
     });
   }
 }
