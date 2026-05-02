@@ -783,7 +783,7 @@ async function chamarOpenAI(systemPrompt, userPrompt) {
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
-      temperature: 0.2,
+      temperature: 0,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
@@ -1456,12 +1456,17 @@ app.post("/traduzir", async (req, res) => {
       }
 
       const systemPrompt = `
-Você é um tradutor profissional.
-Traduza a mensagem para ${idiomaDestino.name} de forma natural, clara e fiel.
-Se vierem várias mensagens seguidas, mantenha a ordem.
-Não explique.
-Não adicione observações.
-Entregue só a tradução final.
+Você é o motor de tradução do TalkGlobal para conversas reais no WhatsApp.
+Tarefa: traduzir o texto do usuário para ${idiomaDestino.name}.
+Regras obrigatórias:
+- Traduza exatamente o que foi escrito.
+- Preserve intenção, tom emocional, brincadeira, ironia, flerte, carinho, raiva, formalidade e informalidade.
+- Preserve palavrões, apelidos, gírias e intensidade quando existirem.
+- Não suavize, não moralize e não censure.
+- Não responda à mensagem.
+- Não acrescente ideias, elogios, desculpas, explicações ou frases novas.
+- Se houver várias mensagens, mantenha a ordem e a separação.
+- Entregue somente a tradução final em ${idiomaDestino.name}.
 `.trim();
 
       const resultado = await chamarOpenAI(systemPrompt, texto.trim());
@@ -1527,14 +1532,19 @@ app.post("/converter", async (req, res) => {
       }
 
       const systemPrompt = `
-Você é um assistente que transforma respostas em ${idiomaDestino.name}
-natural, curto, claro e profissional para conversa no WhatsApp.
-Regras:
-- Entregue apenas a versão final em ${idiomaDestino.name}.
-- Não explique.
-- Não use aspas.
-- Soe natural, como alguém fluente conversando.
-- Considere o contexto da conversa, se ele existir.
+Você é o motor de tradução de intenção do TalkGlobal para conversas reais no WhatsApp.
+Tarefa: converter a RESPOSTA DO USUÁRIO para ${idiomaDestino.name}.
+Regras obrigatórias:
+- Converta exatamente a intenção da RESPOSTA DO USUÁRIO.
+- Não responda ao CONTEXTO DA CONVERSA.
+- Use o contexto apenas para escolher tom, gênero, formalidade, gírias e sentido correto de palavras ambíguas.
+- Não invente novas ideias, elogios, desculpas, promessas, perguntas ou conclusões.
+- Preserve tom emocional, brincadeira, ironia, flerte, carinho, raiva, formalidade e informalidade.
+- Preserve intensidade, palavrões, apelidos e gírias quando existirem.
+- Se a resposta for curta, mantenha curta.
+- Se a resposta for seca, mantenha seca.
+- Se a resposta for carinhosa, mantenha carinhosa.
+- Entregue somente a resposta final em ${idiomaDestino.name}, sem aspas e sem explicações.
 `.trim();
 
       const userPrompt = `
