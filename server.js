@@ -29,6 +29,33 @@ const FREE_CONVERT_LIMIT = 20;
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+const SUPPORTED_LANGUAGES = {
+  "pt-BR": "Portuguese (Brazil)",
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+  it: "Italian",
+  nl: "Dutch",
+  ru: "Russian",
+  zh: "Chinese",
+  ja: "Japanese",
+  ko: "Korean",
+  ar: "Arabic",
+  hi: "Hindi",
+  tr: "Turkish",
+  pl: "Polish",
+  sv: "Swedish",
+  no: "Norwegian",
+  da: "Danish",
+  fi: "Finnish",
+  he: "Hebrew",
+  id: "Indonesian",
+  vi: "Vietnamese",
+  th: "Thai",
+  uk: "Ukrainian"
+};
+
 function gerarAccessKey() {
   return `tg_${crypto.randomBytes(16).toString("hex")}`;
 }
@@ -39,6 +66,13 @@ function normalizarEmail(email) {
 
 function validarEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function obterIdiomaDestino(valor, fallback = "pt-BR") {
+  const codigo = String(valor || fallback).trim();
+  return SUPPORTED_LANGUAGES[codigo]
+    ? { code: codigo, name: SUPPORTED_LANGUAGES[codigo] }
+    : { code: fallback, name: SUPPORTED_LANGUAGES[fallback] };
 }
 
 function getDeviceLimitForPlan(plan) {
@@ -694,7 +728,7 @@ async function verificarAuth(req, res, next) {
   } catch (error) {
     console.error("Erro em verificarAuth:", error);
     return res.status(500).json({
-      erro: `Erro interno ao validar autenticação: ${error.message || "erro desconhecido"}`
+      erro: "Erro interno ao validar autenticação."
     });
   }
 }
@@ -1374,7 +1408,8 @@ app.post("/traduzir", async (req, res) => {
         });
       }
 
-      const { texto } = req.body || {};
+      const { texto, targetLanguage } = req.body || {};
+      const idiomaDestino = obterIdiomaDestino(targetLanguage, "pt-BR");
 
       if (!texto || typeof texto !== "string" || !texto.trim()) {
         return res.status(400).json({
@@ -1384,7 +1419,7 @@ app.post("/traduzir", async (req, res) => {
 
       const systemPrompt = `
 Você é um tradutor profissional.
-Traduza a mensagem para português do Brasil de forma natural, clara e fiel.
+Traduza a mensagem para ${idiomaDestino.name} de forma natural, clara e fiel.
 Se vierem várias mensagens seguidas, mantenha a ordem.
 Não explique.
 Não adicione observações.
@@ -1444,7 +1479,8 @@ app.post("/converter", async (req, res) => {
         });
       }
 
-      const { texto, contexto } = req.body || {};
+      const { texto, contexto, targetLanguage } = req.body || {};
+      const idiomaDestino = obterIdiomaDestino(targetLanguage, "en");
 
       if (!texto || typeof texto !== "string" || !texto.trim()) {
         return res.status(400).json({
@@ -1453,10 +1489,10 @@ app.post("/converter", async (req, res) => {
       }
 
       const systemPrompt = `
-Você é um assistente que transforma respostas escritas em português
-em inglês natural, curto, claro e profissional para conversa no WhatsApp.
+Você é um assistente que transforma respostas em ${idiomaDestino.name}
+natural, curto, claro e profissional para conversa no WhatsApp.
 Regras:
-- Entregue apenas a versão final em inglês.
+- Entregue apenas a versão final em ${idiomaDestino.name}.
 - Não explique.
 - Não use aspas.
 - Soe natural, como alguém fluente conversando.
@@ -1467,7 +1503,7 @@ Regras:
 CONTEXTO DA CONVERSA:
 ${contexto || "(sem contexto)"}
 
-RESPOSTA EM PORTUGUÊS:
+RESPOSTA DO USUÁRIO:
 ${texto.trim()}
 `.trim();
 
