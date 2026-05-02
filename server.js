@@ -694,7 +694,7 @@ async function verificarAuth(req, res, next) {
   } catch (error) {
     console.error("Erro em verificarAuth:", error);
     return res.status(500).json({
-      erro: "Erro interno ao validar autenticação."
+      erro: `Erro interno ao validar autenticação: ${error.message || "erro desconhecido"}`
     });
   }
 }
