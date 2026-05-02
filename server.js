@@ -56,6 +56,17 @@ const SUPPORTED_LANGUAGES = {
   uk: "Ukrainian"
 };
 
+function getJwtPayload(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length < 2) return null;
+    const payload = Buffer.from(parts[1], "base64url").toString("utf8");
+    return JSON.parse(payload);
+  } catch (_error) {
+    return null;
+  }
+}
+
 function gerarAccessKey() {
   return `tg_${crypto.randomBytes(16).toString("hex")}`;
 }
@@ -604,71 +615,86 @@ async function upsertDispositivo(authUserId, deviceId, deviceName) {
 }
 
 async function validarLimiteDispositivos(user, deviceId, deviceName) {
-  if (!user?.auth_user_id) {
-    throw new Error("Usuário sem auth_user_id.");
-  }
-
-  if (!deviceId || typeof deviceId !== "string" || !deviceId.trim()) {
-    return {
-      ok: false,
-      statusCode: 400,
-      erro: "Dispositivo não identificado."
-    };
-  }
-
-  await removerDispositivosAntigos(user.auth_user_id);
-
-  const deviceIdLimpo = deviceId.trim();
   const limite = getDeviceLimitForPlan(user.plan);
-  const deviceExistente = await buscarDispositivo(user.auth_user_id, deviceIdLimpo);
 
-  if (deviceExistente) {
-    const atualizado = await upsertDispositivo(
+  try {
+    if (!user?.auth_user_id) {
+      throw new Error("Usuário sem auth_user_id.");
+    }
+
+    if (!deviceId || typeof deviceId !== "string" || !deviceId.trim()) {
+      return {
+        ok: false,
+        statusCode: 400,
+        erro: "Dispositivo não identificado."
+      };
+    }
+
+    await removerDispositivosAntigos(user.auth_user_id);
+
+    const deviceIdLimpo = deviceId.trim();
+    const deviceExistente = await buscarDispositivo(user.auth_user_id, deviceIdLimpo);
+
+    if (deviceExistente) {
+      const atualizado = await upsertDispositivo(
+        user.auth_user_id,
+        deviceIdLimpo,
+        deviceName || deviceExistente.device_name || null
+      );
+
+      return {
+        ok: true,
+        dispositivo: atualizado,
+        limite
+      };
+    }
+
+    const dispositivosAtivos = await listarDispositivosAtivos(user.auth_user_id);
+
+    if (dispositivosAtivos.length >= limite) {
+      const removerQtd = (dispositivosAtivos.length - limite) + 1;
+
+      const antigos = dispositivosAtivos
+        .slice()
+        .sort((a, b) => new Date(a.last_seen_at) - new Date(b.last_seen_at))
+        .slice(0, removerQtd);
+
+      const idsParaRemover = antigos.map((d) => d.id);
+
+      const { error: deleteError } = await supabase
+        .from("user_devices")
+        .delete()
+        .in("id", idsParaRemover);
+
+      if (deleteError) {
+        throw new Error(`Erro ao remover dispositivo antigo: ${deleteError.message}`);
+      }
+    }
+
+    const criado = await upsertDispositivo(
       user.auth_user_id,
       deviceIdLimpo,
-      deviceName || deviceExistente.device_name || null
+      deviceName || null
     );
 
     return {
       ok: true,
-      dispositivo: atualizado,
+      dispositivo: criado,
       limite
     };
+  } catch (error) {
+    console.error("Erro ao validar dispositivo. Permitindo acesso temporariamente:", {
+      message: error.message,
+      authUserId: user?.auth_user_id || null
+    });
+
+    return {
+      ok: true,
+      dispositivo: null,
+      limite,
+      aviso: "device_tracking_unavailable"
+    };
   }
-
-  const dispositivosAtivos = await listarDispositivosAtivos(user.auth_user_id);
-
-  if (dispositivosAtivos.length >= limite) {
-    const removerQtd = (dispositivosAtivos.length - limite) + 1;
-
-    const antigos = dispositivosAtivos
-      .slice()
-      .sort((a, b) => new Date(a.last_seen_at) - new Date(b.last_seen_at))
-      .slice(0, removerQtd);
-
-    const idsParaRemover = antigos.map((d) => d.id);
-
-    const { error: deleteError } = await supabase
-      .from("user_devices")
-      .delete()
-      .in("id", idsParaRemover);
-
-    if (deleteError) {
-      throw new Error(`Erro ao remover dispositivo antigo: ${deleteError.message}`);
-    }
-  }
-
-  const criado = await upsertDispositivo(
-    user.auth_user_id,
-    deviceIdLimpo,
-    deviceName || null
-  );
-
-  return {
-    ok: true,
-    dispositivo: criado,
-    limite
-  };
 }
 
 async function verificarAuth(req, res, next) {
@@ -952,6 +978,7 @@ app.get("/debug/env", (req, res) => {
   res.json({
     supabase: Boolean(SUPABASE_URL),
     supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+    supabaseKeyRole: getJwtPayload(SUPABASE_SERVICE_ROLE_KEY)?.role || null,
     hotmartProduct: Boolean(process.env.HOTMART_PRODUCT_ID),
     hotmartToken: Boolean(process.env.HOTMART_WEBHOOK_TOKEN),
     hotmartBasicUrl: Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL),
