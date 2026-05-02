@@ -33,6 +33,14 @@ function gerarAccessKey() {
   return `tg_${crypto.randomBytes(16).toString("hex")}`;
 }
 
+function normalizarEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function validarEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 function getDeviceLimitForPlan(plan) {
   const plano = String(plan || "").toLowerCase();
 
@@ -1075,6 +1083,108 @@ app.post("/criar-usuario", async (req, res) => {
     console.error("Erro em /criar-usuario:", error);
     return res.status(500).json({
       erro: error.message || "Erro ao criar usuário."
+    });
+  }
+});
+
+app.post("/auth/request-otp", async (req, res) => {
+  try {
+    const email = normalizarEmail(req.body?.email);
+
+    if (!validarEmail(email)) {
+      return res.status(400).json({
+        erro: "Email inválido."
+      });
+    }
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: true
+      }
+    });
+
+    if (error) {
+      return res.status(400).json({
+        erro: error.message || "Erro ao enviar código por e-mail."
+      });
+    }
+
+    return res.json({
+      ok: true
+    });
+  } catch (error) {
+    console.error("Erro em /auth/request-otp:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao enviar código por e-mail."
+    });
+  }
+});
+
+app.post("/auth/verify-otp", async (req, res) => {
+  try {
+    const email = normalizarEmail(req.body?.email);
+    const token = String(req.body?.token || "").trim();
+
+    if (!validarEmail(email)) {
+      return res.status(400).json({
+        erro: "Email inválido."
+      });
+    }
+
+    if (!/^\d{6,8}$/.test(token)) {
+      return res.status(400).json({
+        erro: "Código inválido."
+      });
+    }
+
+    const { data, error } = await supabase.auth.verifyOtp({
+      email,
+      token,
+      type: "email"
+    });
+
+    if (error || !data?.session || !data?.user) {
+      return res.status(401).json({
+        erro: error?.message || "Código inválido."
+      });
+    }
+
+    const dbUser = await criarOuVincularUsuarioAuth(data.user);
+    const validacao = validarStatusDoUsuario(dbUser);
+
+    if (!validacao.ok) {
+      return res.status(validacao.statusCode).json({
+        erro: validacao.erro
+      });
+    }
+
+    const deviceId = String(req.headers[DEVICE_ID_HEADER] || "").trim();
+    const deviceName = String(req.headers[DEVICE_NAME_HEADER] || "").trim();
+
+    const validacaoDevice = await validarLimiteDispositivos(
+      dbUser,
+      deviceId,
+      deviceName
+    );
+
+    if (!validacaoDevice.ok) {
+      return res.status(validacaoDevice.statusCode).json({
+        erro: validacaoDevice.erro
+      });
+    }
+
+    return res.json({
+      ok: true,
+      session: data.session,
+      usuario: mapearUsuarioDoBanco(dbUser),
+      dispositivo: mapearDevice(validacaoDevice.dispositivo),
+      limiteDispositivos: validacaoDevice.limite
+    });
+  } catch (error) {
+    console.error("Erro em /auth/verify-otp:", error);
+    return res.status(500).json({
+      erro: error.message || "Erro ao confirmar código."
     });
   }
 });
