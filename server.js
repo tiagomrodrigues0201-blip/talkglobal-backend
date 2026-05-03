@@ -7,6 +7,9 @@ const { supabase } = require("./lib/supabase");
 const {
   PORT,
   OPENAI_API_KEY,
+  STRIPE_WEBHOOK_SECRET,
+  CLIENT_SUCCESS_URL,
+  CLIENT_CANCEL_URL,
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   DEVICE_ID_HEADER,
@@ -16,10 +19,16 @@ const {
 
 const {
   HOTMART_PRODUCT_ID,
-  getHotmartCheckoutUrl,
   getPlanoPorHotmart,
   validarTokenHotmart
 } = require("./lib/hotmart");
+
+const {
+  garantirStripeConfigurado,
+  getStripePriceId,
+  getPlanoPorStripeSubscription,
+  normalizarPlano
+} = require("./lib/stripe");
 
 const app = express();
 
@@ -27,6 +36,33 @@ const FREE_TRANSLATE_LIMIT = 20;
 const FREE_CONVERT_LIMIT = 20;
 
 app.use(cors());
+app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const stripe = garantirStripeConfigurado();
+
+    if (!STRIPE_WEBHOOK_SECRET) {
+      return res.status(500).json({
+        erro: "STRIPE_WEBHOOK_SECRET não configurado."
+      });
+    }
+
+    const signature = req.headers["stripe-signature"];
+    const event = stripe.webhooks.constructEvent(
+      req.body,
+      signature,
+      STRIPE_WEBHOOK_SECRET
+    );
+
+    await processarEventoStripe(event);
+
+    return res.json({ received: true });
+  } catch (error) {
+    console.error("Erro no webhook Stripe:", error);
+    return res.status(400).json({
+      erro: error.message || "Erro no webhook Stripe."
+    });
+  }
+});
 app.use(express.json({ limit: "1mb" }));
 
 const SUPPORTED_LANGUAGES = {
@@ -245,6 +281,38 @@ async function atualizarUsuarioPorId(userId, campos) {
 
   if (error) {
     throw new Error(`Erro ao atualizar usuário por id: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function buscarUsuarioPorStripeCustomerId(stripeCustomerId) {
+  if (!stripeCustomerId) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("stripe_customer_id", stripeCustomerId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao buscar usuário por stripe_customer_id: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function buscarUsuarioPorStripeSubscriptionId(stripeSubscriptionId) {
+  if (!stripeSubscriptionId) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("stripe_subscription_id", stripeSubscriptionId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao buscar usuário por stripe_subscription_id: ${error.message}`);
   }
 
   return data;
@@ -893,7 +961,7 @@ function eventoIgnoravel(evento) {
   ].includes(evento);
 }
 
-async function ativarUsuario(email, plan) {
+async function ativarUsuario(email, plan, extras = {}) {
   let user = await buscarUsuarioPorEmail(email);
 
   if (user) {
@@ -903,7 +971,8 @@ async function ativarUsuario(email, plan) {
       plan: plan || "basic",
       translate_usage_limit: null,
       convert_usage_limit: null,
-      trial_ends_at: null
+      trial_ends_at: null,
+      ...extras
     };
 
     if (user.auth_user_id) {
@@ -928,6 +997,7 @@ async function ativarUsuario(email, plan) {
     trial_ends_at: null,
     stripe_customer_id: null,
     stripe_subscription_id: null,
+    ...extras,
     created_at: agora,
     updated_at: agora
   };
@@ -967,6 +1037,126 @@ async function voltarUsuarioParaFree(email) {
   return atualizarUsuarioPorAccessKey(user.access_key, campos);
 }
 
+async function voltarUsuarioStripeParaFree({ email, stripeCustomerId, stripeSubscriptionId }) {
+  const user =
+    (stripeSubscriptionId && await buscarUsuarioPorStripeSubscriptionId(stripeSubscriptionId)) ||
+    (stripeCustomerId && await buscarUsuarioPorStripeCustomerId(stripeCustomerId)) ||
+    (email && await buscarUsuarioPorEmail(email));
+
+  if (!user) {
+    return null;
+  }
+
+  const campos = {
+    status: "free",
+    plan: "free",
+    translate_usage_limit: FREE_TRANSLATE_LIMIT,
+    convert_usage_limit: FREE_CONVERT_LIMIT,
+    trial_ends_at: null,
+    stripe_subscription_id: stripeSubscriptionId || user.stripe_subscription_id || null
+  };
+
+  if (user.auth_user_id) {
+    return atualizarUsuarioPorAuthUserId(user.auth_user_id, campos);
+  }
+
+  return atualizarUsuarioPorAccessKey(user.access_key, campos);
+}
+
+async function obterEmailDoCustomerStripe(stripe, customerId) {
+  if (!customerId) return "";
+
+  const customer = await stripe.customers.retrieve(customerId);
+  return String(customer?.email || "").trim().toLowerCase();
+}
+
+async function ativarAssinaturaStripe({
+  email,
+  plan,
+  stripeCustomerId,
+  stripeSubscriptionId
+}) {
+  const emailLimpo = normalizarEmail(email);
+
+  if (!validarEmail(emailLimpo)) {
+    throw new Error("Email inválido no evento Stripe.");
+  }
+
+  return ativarUsuario(emailLimpo, plan || "basic", {
+    stripe_customer_id: stripeCustomerId || null,
+    stripe_subscription_id: stripeSubscriptionId || null
+  });
+}
+
+async function processarEventoStripe(event) {
+  const stripe = garantirStripeConfigurado();
+  const data = event?.data?.object || {};
+
+  if (event.type === "checkout.session.completed") {
+    const session = data;
+
+    if (session.mode !== "subscription") {
+      return;
+    }
+
+    const subscriptionId = session.subscription;
+    const subscription = subscriptionId
+      ? await stripe.subscriptions.retrieve(subscriptionId)
+      : null;
+    const plan =
+      normalizarPlano(session.metadata?.plan || getPlanoPorStripeSubscription(subscription));
+
+    await ativarAssinaturaStripe({
+      email: session.customer_details?.email || session.customer_email,
+      plan,
+      stripeCustomerId: session.customer,
+      stripeSubscriptionId: subscriptionId
+    });
+
+    return;
+  }
+
+  if (
+    event.type === "customer.subscription.created" ||
+    event.type === "customer.subscription.updated"
+  ) {
+    const subscription = data;
+    const plan = normalizarPlano(getPlanoPorStripeSubscription(subscription));
+    const email = await obterEmailDoCustomerStripe(stripe, subscription.customer);
+
+    if (["active", "trialing"].includes(subscription.status)) {
+      await ativarAssinaturaStripe({
+        email,
+        plan,
+        stripeCustomerId: subscription.customer,
+        stripeSubscriptionId: subscription.id
+      });
+      return;
+    }
+
+    if (["canceled", "unpaid", "incomplete_expired"].includes(subscription.status)) {
+      await voltarUsuarioStripeParaFree({
+        email,
+        stripeCustomerId: subscription.customer,
+        stripeSubscriptionId: subscription.id
+      });
+    }
+
+    return;
+  }
+
+  if (event.type === "customer.subscription.deleted") {
+    const subscription = data;
+    const email = await obterEmailDoCustomerStripe(stripe, subscription.customer);
+
+    await voltarUsuarioStripeParaFree({
+      email,
+      stripeCustomerId: subscription.customer,
+      stripeSubscriptionId: subscription.id
+    });
+  }
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -983,6 +1173,10 @@ app.get("/debug/env", (req, res) => {
     hotmartToken: Boolean(process.env.HOTMART_WEBHOOK_TOKEN),
     hotmartBasicUrl: Boolean(process.env.HOTMART_BASIC_CHECKOUT_URL),
     hotmartProUrl: Boolean(process.env.HOTMART_PRO_CHECKOUT_URL),
+    stripeSecret: Boolean(process.env.STRIPE_SECRET_KEY),
+    stripeWebhook: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+    stripeBasicPrice: Boolean(process.env.STRIPE_PRICE_BASIC),
+    stripeProPrice: Boolean(process.env.STRIPE_PRICE_PRO),
     freeTranslateLimit: FREE_TRANSLATE_LIMIT,
     freeConvertLimit: FREE_CONVERT_LIMIT,
     openai: Boolean(OPENAI_API_KEY)
@@ -1372,45 +1566,103 @@ app.get("/meu-status", async (req, res) => {
 app.post("/create-checkout-session-auth", verificarAuth, async (req, res) => {
   try {
     const { plan } = req.body || {};
+    const plano = normalizarPlano(plan);
+    const stripe = garantirStripeConfigurado();
+    const priceId = getStripePriceId(plano);
 
-    if (!plan || typeof plan !== "string") {
-      return res.status(400).json({
-        erro: "Plano obrigatório."
-      });
+    const sessionPayload = {
+      mode: "subscription",
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1
+        }
+      ],
+      success_url: CLIENT_SUCCESS_URL,
+      cancel_url: CLIENT_CANCEL_URL,
+      client_reference_id: req.dbUser?.id || req.authUser?.id || null,
+      metadata: {
+        plan: plano,
+        authUserId: req.authUser?.id || "",
+        email: req.authUser?.email || req.dbUser?.email || ""
+      },
+      subscription_data: {
+        metadata: {
+          plan: plano,
+          authUserId: req.authUser?.id || "",
+          email: req.authUser?.email || req.dbUser?.email || ""
+        }
+      },
+      allow_promotion_codes: true
+    };
+
+    if (req.dbUser?.stripeCustomerId) {
+      sessionPayload.customer = req.dbUser.stripeCustomerId;
+    } else {
+      sessionPayload.customer_email = req.authUser?.email || req.dbUser?.email;
     }
 
-    const checkoutUrl = getHotmartCheckoutUrl(plan);
+    const session = await stripe.checkout.sessions.create(sessionPayload);
 
     return res.json({
-      checkoutUrl
+      checkoutUrl: session.url
     });
   } catch (error) {
-    console.error("Erro em /create-checkout-session-auth:", error);
+    console.error("Erro em /create-checkout-session-auth Stripe:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao abrir checkout Hotmart."
+      erro: error.message || "Erro ao abrir checkout Stripe."
     });
   }
 });
 
-app.post("/create-checkout-session", async (req, res) => {
+app.post("/create-checkout-session", verificarAuth, async (req, res) => {
   try {
     const { plan } = req.body || {};
+    const plano = normalizarPlano(plan);
+    const stripe = garantirStripeConfigurado();
+    const priceId = getStripePriceId(plano);
 
-    if (!plan || typeof plan !== "string") {
-      return res.status(400).json({
-        erro: "Plano obrigatório."
-      });
+    const sessionPayload = {
+      mode: "subscription",
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1
+        }
+      ],
+      success_url: CLIENT_SUCCESS_URL,
+      cancel_url: CLIENT_CANCEL_URL,
+      client_reference_id: req.dbUser?.id || req.authUser?.id || null,
+      metadata: {
+        plan: plano,
+        authUserId: req.authUser?.id || "",
+        email: req.authUser?.email || req.dbUser?.email || ""
+      },
+      subscription_data: {
+        metadata: {
+          plan: plano,
+          authUserId: req.authUser?.id || "",
+          email: req.authUser?.email || req.dbUser?.email || ""
+        }
+      },
+      allow_promotion_codes: true
+    };
+
+    if (req.dbUser?.stripeCustomerId) {
+      sessionPayload.customer = req.dbUser.stripeCustomerId;
+    } else {
+      sessionPayload.customer_email = req.authUser?.email || req.dbUser?.email;
     }
 
-    const checkoutUrl = getHotmartCheckoutUrl(plan);
+    const session = await stripe.checkout.sessions.create(sessionPayload);
 
     return res.json({
-      checkoutUrl
+      checkoutUrl: session.url
     });
   } catch (error) {
-    console.error("Erro em /create-checkout-session:", error);
+    console.error("Erro em /create-checkout-session Stripe:", error);
     return res.status(500).json({
-      erro: error.message || "Erro ao abrir checkout Hotmart."
+      erro: error.message || "Erro ao abrir checkout Stripe."
     });
   }
 });
