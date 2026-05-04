@@ -34,6 +34,7 @@ const app = express();
 
 const FREE_TRANSLATE_LIMIT = 20;
 const FREE_CONVERT_LIMIT = 20;
+const USAGE_TIME_ZONE = process.env.USAGE_TIME_ZONE || "America/Sao_Paulo";
 
 app.use(cors());
 app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -137,6 +138,20 @@ function getDeviceCutoffIso() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - dias);
   return cutoff.toISOString();
+}
+
+function getUsageDateKey(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: USAGE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function isPaidPlan(plan) {
+  const plano = String(plan || "").toLowerCase();
+  return plano === "basic" || plano === "pro";
 }
 
 function garantirOpenAIKey(res) {
@@ -490,9 +505,7 @@ function validarLimiteDeUso(user, tipo) {
     };
   }
 
-  const plano = String(user.plan || "").toLowerCase();
-
-  if (plano === "basic" || plano === "pro") {
+  if (isPaidPlan(user.plan)) {
     return { ok: true };
   }
 
@@ -552,9 +565,7 @@ function validarLimiteDeUso(user, tipo) {
 async function consumirUsoSeNecessario(user, tipo) {
   if (!user) return user;
 
-  const plano = String(user.plan || "").toLowerCase();
-
-  if (plano === "basic" || plano === "pro") {
+  if (isPaidPlan(user.plan)) {
     return user;
   }
 
@@ -571,6 +582,36 @@ async function consumirUsoSeNecessario(user, tipo) {
   }
 
   return user;
+}
+
+async function resetarUsoDiarioSeNecessario(user) {
+  if (!user || isPaidPlan(user.plan)) {
+    return user;
+  }
+
+  const hoje = getUsageDateKey();
+  const ultimaAtualizacao = user.updated_at ? getUsageDateKey(new Date(user.updated_at)) : null;
+
+  if (ultimaAtualizacao === hoje) {
+    return user;
+  }
+
+  const precisaResetar =
+    Number(user.translate_usage_count || 0) > 0 ||
+    Number(user.convert_usage_count || 0) > 0 ||
+    user.translate_usage_limit !== FREE_TRANSLATE_LIMIT ||
+    user.convert_usage_limit !== FREE_CONVERT_LIMIT;
+
+  if (!precisaResetar) {
+    return user;
+  }
+
+  return atualizarUsuarioPorId(user.id, {
+    translate_usage_count: 0,
+    translate_usage_limit: FREE_TRANSLATE_LIMIT,
+    convert_usage_count: 0,
+    convert_usage_limit: FREE_CONVERT_LIMIT
+  });
 }
 
 async function verificarAcessoLegacy(req, res, next) {
@@ -1529,7 +1570,8 @@ app.get("/meu-status", async (req, res) => {
   if (authHeader.startsWith("Bearer ")) {
     return verificarAuth(req, res, async () => {
       try {
-        const usuario = await buscarUsuarioPorAuthUserId(req.authUser.id);
+        let usuario = await buscarUsuarioPorAuthUserId(req.authUser.id);
+        usuario = await resetarUsoDiarioSeNecessario(usuario);
 
         return res.json({
           ok: true,
@@ -1548,7 +1590,8 @@ app.get("/meu-status", async (req, res) => {
 
   return verificarAcessoLegacy(req, res, async () => {
     try {
-      const usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
+      let usuario = await buscarUsuarioPorAccessKey(req.tgUser.key);
+      usuario = await resetarUsoDiarioSeNecessario(usuario);
 
       return res.json({
         ok: true,
@@ -1675,9 +1718,10 @@ app.post("/traduzir", async (req, res) => {
       if (!garantirOpenAIKey(res)) return;
 
       const usuarioAtual = obterUsuarioAtualDaRequest(req);
-      const usuarioBanco = usuarioAtual?.authUserId
+      let usuarioBanco = usuarioAtual?.authUserId
         ? await buscarUsuarioPorAuthUserId(usuarioAtual.authUserId)
         : await buscarUsuarioPorAccessKey(usuarioAtual?.key || "");
+      usuarioBanco = await resetarUsoDiarioSeNecessario(usuarioBanco);
 
       const validacaoUso = validarLimiteDeUso(usuarioBanco, "traduzir");
 
@@ -1751,9 +1795,10 @@ app.post("/converter", async (req, res) => {
       if (!garantirOpenAIKey(res)) return;
 
       const usuarioAtual = obterUsuarioAtualDaRequest(req);
-      const usuarioBanco = usuarioAtual?.authUserId
+      let usuarioBanco = usuarioAtual?.authUserId
         ? await buscarUsuarioPorAuthUserId(usuarioAtual.authUserId)
         : await buscarUsuarioPorAccessKey(usuarioAtual?.key || "");
+      usuarioBanco = await resetarUsoDiarioSeNecessario(usuarioBanco);
 
       const validacaoUso = validarLimiteDeUso(usuarioBanco, "converter");
 
