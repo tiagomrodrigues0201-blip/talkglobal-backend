@@ -29,6 +29,7 @@ const {
   getPlanoPorStripeSubscription,
   normalizarPlano
 } = require("./lib/stripe");
+const { registerCartasRoutes } = require("./lib/cartas/routes");
 
 const app = express();
 
@@ -64,7 +65,7 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
     });
   }
 });
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "8mb" }));
 
 const SUPPORTED_LANGUAGES = {
   "pt-BR": "Portuguese (Brazil)",
@@ -1873,6 +1874,8 @@ ${texto.trim()}
 
   return verificarAcessoLegacy(req, res, executar);
 });
+
+registerCartasRoutes(app, { supabase, verificarAuth });
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
