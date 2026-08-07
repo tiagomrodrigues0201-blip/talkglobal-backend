@@ -29,7 +29,7 @@ const {
   getPlanoPorStripeSubscription,
   normalizarPlano
 } = require("./lib/stripe");
-const { registerCartasRoutes } = require("./lib/cartas/routes");
+const { createVerificarAuthCartas, registerCartasRoutes } = require("./lib/cartas/routes");
 
 const app = express();
 
@@ -1875,7 +1875,7 @@ ${texto.trim()}
   return verificarAcessoLegacy(req, res, executar);
 });
 
-registerCartasRoutes(app, { supabase, verificarAuth });
+registerCartasRoutes(app, { supabase, verificarAuth: createVerificarAuthCartas(supabase) });
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);

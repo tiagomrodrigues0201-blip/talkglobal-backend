@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { registerCartasRoutes } = require("../lib/cartas/routes");
+const { createVerificarAuthCartas, registerCartasRoutes } = require("../lib/cartas/routes");
 
 const AUTH_USER_ID = "11111111-1111-4111-8111-111111111111";
 const DB_AUTH_USER_ID = "22222222-2222-4222-8222-222222222222";
@@ -178,18 +178,18 @@ test("cartas initial-cards usa req.authUser.id como UUID principal", async () =>
   assert.equal(rpcCall.params.p_user_id, AUTH_USER_ID);
 });
 
-test("cartas initial-cards aceita req.dbUser.authUserId apenas como fallback", async () => {
-  const supabase = makeRecorderSupabase({ rpcRows: makeRpcRows("initial_cards_created", true, DB_AUTH_USER_ID) });
+test("cartas initial-cards nao usa req.dbUser.authUserId legado como fallback", async () => {
+  const supabase = makeRecorderSupabase();
   const app = makeApp({
     supabase,
     dbUser: { id: "public-user-id-never-used", authUserId: DB_AUTH_USER_ID }
   });
 
   const response = await request(app);
-  const rpcCall = supabase.calls.find((call) => call.type === "rpc");
 
-  assert.equal(response.status, 201);
-  assert.equal(rpcCall.params.p_user_id, DB_AUTH_USER_ID);
+  assert.equal(response.status, 401);
+  assert.equal(response.json.error, "user_not_found");
+  assert.equal(supabase.calls.some((call) => call.type === "rpc"), false);
 });
 
 test("cartas initial-cards nunca utiliza req.dbUser.id como UUID de cartas", async () => {
@@ -270,4 +270,106 @@ test("cartas initial-cards trata erro da RPC sem iniciar outras gravações", as
   assert.equal(response.json.error, "initial_cards_failed");
   assert.equal(supabase.calls.filter((call) => call.type === "rpc").length, 1);
   assert.equal(writeCalls.length, 0);
+});
+
+function makeAuthResponse() {
+  return {
+    statusCode: 200,
+    payload: undefined,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    }
+  };
+}
+
+test("verificarAuthCartas rejeita requisicao sem bearer token sem consultar tabelas legadas", async () => {
+  const calls = [];
+  const supabase = {
+    auth: {
+      getUser(token) {
+        calls.push({ type: "getUser", token });
+        return Promise.resolve({ data: { user: null }, error: null });
+      }
+    },
+    from(table) {
+      calls.push({ type: "from", table });
+      throw new Error(`legacy table should not be used: ${table}`);
+    }
+  };
+  const middleware = createVerificarAuthCartas(supabase);
+  const req = { headers: {} };
+  const res = makeAuthResponse();
+  let nextCalled = false;
+
+  await middleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.payload.error, "token_not_sent");
+  assert.equal(nextCalled, false);
+  assert.deepEqual(calls, []);
+});
+
+test("verificarAuthCartas valida token diretamente no Supabase Auth e popula req.authUser", async () => {
+  const calls = [];
+  const supabase = {
+    auth: {
+      getUser(token) {
+        calls.push({ type: "getUser", token });
+        return Promise.resolve({ data: { user: { id: AUTH_USER_ID, email: "player@example.com" } }, error: null });
+      }
+    },
+    from(table) {
+      calls.push({ type: "from", table });
+      throw new Error(`legacy table should not be used: ${table}`);
+    }
+  };
+  const middleware = createVerificarAuthCartas(supabase);
+  const req = { headers: { authorization: "Bearer valid-token" } };
+  const res = makeAuthResponse();
+  let nextCalled = false;
+
+  await middleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(nextCalled, true);
+  assert.equal(req.authUser.id, AUTH_USER_ID);
+  assert.deepEqual(calls, [{ type: "getUser", token: "valid-token" }]);
+});
+
+test("verificarAuthCartas rejeita token invalido sem criar usuario ou dispositivo legado", async () => {
+  const calls = [];
+  const supabase = {
+    auth: {
+      getUser(token) {
+        calls.push({ type: "getUser", token });
+        return Promise.resolve({ data: { user: null }, error: { message: "invalid" } });
+      }
+    },
+    from(table) {
+      calls.push({ type: "from", table });
+      throw new Error(`legacy table should not be used: ${table}`);
+    }
+  };
+  const middleware = createVerificarAuthCartas(supabase);
+  const req = { headers: { authorization: "Bearer invalid-token" } };
+  const res = makeAuthResponse();
+  let nextCalled = false;
+
+  await middleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.payload.error, "invalid_token");
+  assert.equal(nextCalled, false);
+  assert.deepEqual(calls, [{ type: "getUser", token: "invalid-token" }]);
 });
