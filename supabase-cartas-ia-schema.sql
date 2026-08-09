@@ -478,3 +478,9 @@ grant select on public.player_decks to authenticated;
 grant select on public.card_generations to authenticated;
 grant select on public.player_progression to authenticated;
 grant select on public.battles to authenticated;
+
+-- The backend uses the server-side Supabase client with the service_role key.
+grant select on public.player_cards to service_role;
+grant select, insert, delete on public.player_decks to service_role;
+grant select, insert, update on public.player_progression to service_role;
+grant select, insert, update on public.battles to service_role;

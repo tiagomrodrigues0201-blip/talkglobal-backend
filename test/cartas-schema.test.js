@@ -65,6 +65,17 @@ test("migration nao depende de public.users nem auth_user_id", () => {
 });
 
 test("migration nao concede escrita direta a clientes", () => {
-  assert.equal(has(/grant\s+(insert|update|delete)/i), false);
+  assert.equal(has(/grant\s+(insert|update|delete)[\s\S]+?\s+to\s+(anon|authenticated)/i), false);
   assert.equal(has(/for\s+(insert|update|delete)\s+to\s+(anon|authenticated)/i), false);
+});
+
+test("migration concede privilegios explicitos minimos ao service_role", () => {
+  assert.equal(hasNormalized("grant select on public.player_cards to service_role;"), true);
+  assert.equal(has(/grant\s+[^;]*(insert|update|delete)[^;]*on\s+public\.player_cards\s+to\s+service_role/i), false);
+  assert.equal(hasNormalized("grant select, insert, delete on public.player_decks to service_role;"), true);
+  assert.equal(has(/grant\s+[^;]*update[^;]*on\s+public\.player_decks\s+to\s+service_role/i), false);
+  assert.equal(has(/grant\s+[^;]+on\s+public\.card_generations\s+to\s+service_role/i), false);
+  assert.equal(hasNormalized("grant select, insert, update on public.player_progression to service_role;"), true);
+  assert.equal(hasNormalized("grant select, insert, update on public.battles to service_role;"), true);
+  assert.equal(has(/grant\s+all/i), false);
 });
